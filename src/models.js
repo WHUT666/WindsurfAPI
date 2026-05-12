@@ -211,6 +211,17 @@ export const MODELS = {
   'adaptive':                       { name: 'adaptive',                       provider: 'windsurf', enumValue: 0,   modelUid: 'adaptive', credit: 1, deprecated: true },
   'arena-fast':                     { name: 'arena-fast',                     provider: 'windsurf', enumValue: 0,   modelUid: 'arena-fast', credit: 0.5, deprecated: true },
   'arena-smart':                    { name: 'arena-smart',                    provider: 'windsurf', enumValue: 0,   modelUid: 'arena-smart', credit: 1, deprecated: true },
+
+  // ── Devin Sessions (Cognition official API) ─────────────
+  // Routed via handlers/devin-chat.js — does NOT touch the Windsurf
+  // account pool or Language Server. Enabled when DEVIN_API_KEY is set.
+  // `provider: 'devin-sessions'` is checked by handleChatCompletions to
+  // short-circuit into the Devin adapter. `credit: 0` means these models
+  // don't participate in Windsurf ACU bookkeeping (they bill against
+  // your Devin org ACU budget instead).
+  'devin':                          { name: 'devin',                          provider: 'devin-sessions', enumValue: 0, credit: 0 },
+  'devin-fast':                     { name: 'devin-fast',                     provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 5 },
+  'devin-deep':                     { name: 'devin-deep',                     provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 50 },
 };
 
 // Build reverse lookup
@@ -548,11 +559,23 @@ export function getTierModels(tier) {
   return MODEL_TIER_ACCESS[tier] || MODEL_TIER_ACCESS.unknown;
 }
 
-/** List all models in OpenAI /v1/models format. Hides deprecated models. */
+/** List all models in OpenAI /v1/models format. Hides deprecated models.
+ *  Devin-sessions models are only listed when DEVIN_API_KEY is configured,
+ *  so clients that don't have a Devin key don't see entries that will only
+ *  ever 503. Lazy-imported to avoid a config.js cycle when models.js is
+ *  loaded very early. */
 export function listModels() {
   const ts = Math.floor(Date.now() / 1000);
+  // eslint-disable-next-line global-require
+  let devinConfigured = false;
+  try {
+    // dynamic import avoided to keep this synchronous; the env var is the
+    // source of truth and is loaded before any model listing happens.
+    devinConfigured = !!process.env.DEVIN_API_KEY;
+  } catch {}
   return Object.entries(MODELS)
     .filter(([, info]) => !info.deprecated)
+    .filter(([, info]) => info.provider !== 'devin-sessions' || devinConfigured)
     .map(([id, info]) => ({
       id: info.name,
       object: 'model',

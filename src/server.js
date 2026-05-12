@@ -31,6 +31,18 @@ import { setAccountProxy } from './dashboard/proxy-config.js';
 import { config, log } from './config.js';
 import { VERSION } from './version.js';
 import { callerKeyFromRequest } from './caller-key.js';
+import { resolveModel, getModelInfo } from './models.js';
+
+// Devin-sessions models don't use the Windsurf account pool — they
+// talk to api.devin.ai directly. When such a model is requested, skip
+// the `isAuthenticated()` gate (which checks Windsurf account state)
+// and let handleDevinChat enforce the DEVIN_API_KEY requirement.
+function isDevinSessionModel(modelName) {
+  if (!modelName) return false;
+  const key = resolveModel(modelName);
+  const info = key ? getModelInfo(key) : null;
+  return info?.provider === 'devin-sessions';
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
@@ -316,12 +328,6 @@ async function route(req, res) {
   }
 
   if (path === '/v1/chat/completions' && method === 'POST') {
-    if (!isAuthenticated()) {
-      return json(res, 503, {
-        error: { message: 'No active accounts. POST /auth/login to add accounts.', type: 'auth_error' },
-      });
-    }
-
     let body;
     try { body = JSON.parse(await readBody(req)); } catch {
       return json(res, 400, { error: { message: 'Invalid JSON', type: 'invalid_request' } });
@@ -332,9 +338,16 @@ async function route(req, res) {
     if (body.messages.length === 0) {
       return json(res, 400, { error: { message: 'messages must contain at least 1 item', type: 'invalid_request' } });
     }
+    // Windsurf account gate — bypassed for Devin-sessions models which
+    // have their own DEVIN_API_KEY check inside handleDevinChat.
+    if (!isDevinSessionModel(body.model) && !isAuthenticated()) {
+      return json(res, 503, {
+        error: { message: 'No active accounts. POST /auth/login to add accounts.', type: 'auth_error' },
+      });
+    }
 
     const reqStartedAt = Date.now();
-    const result = await handleChatCompletions(body, { callerKey: callerKeyFromRequest(req, extractToken(req), body) });
+    const result = await handleChatCompletions(body, { callerKey: callerKeyFromRequest(req, extractToken(req), body), headers: req.headers });
     const processingMs = Date.now() - reqStartedAt;
     const modelHeaders = {
       'x-request-id': 'req-' + randomUUID(),
@@ -369,12 +382,6 @@ async function route(req, res) {
   }
 
   if (path === '/v1/responses' && method === 'POST') {
-    if (!isAuthenticated()) {
-      return json(res, 503, {
-        error: { message: 'No active accounts. POST /auth/login to add accounts.', type: 'auth_error' },
-      });
-    }
-
     let body;
     try { body = JSON.parse(await readBody(req)); } catch {
       return json(res, 400, { error: { message: 'Invalid JSON', type: 'invalid_request' } });
@@ -382,9 +389,14 @@ async function route(req, res) {
     if (body.input == null) {
       return json(res, 400, { error: { message: 'input is required', type: 'invalid_request' } });
     }
+    if (!isDevinSessionModel(body.model) && !isAuthenticated()) {
+      return json(res, 503, {
+        error: { message: 'No active accounts. POST /auth/login to add accounts.', type: 'auth_error' },
+      });
+    }
 
     const reqStartedAt = Date.now();
-    const result = await handleResponses(body, { context: { callerKey: callerKeyFromRequest(req, extractToken(req), body) } });
+    const result = await handleResponses(body, { context: { callerKey: callerKeyFromRequest(req, extractToken(req), body), headers: req.headers } });
     const processingMs = Date.now() - reqStartedAt;
     const modelHeaders = {
       'x-request-id': 'req-' + randomUUID(),
@@ -408,9 +420,6 @@ async function route(req, res) {
 
   // Anthropic Messages API — Claude Code compatibility
   if (path === '/v1/messages' && method === 'POST') {
-    if (!isAuthenticated()) {
-      return json(res, 503, { type: 'error', error: { type: 'api_error', message: 'No active accounts' } });
-    }
     let body;
     try { body = JSON.parse(await readBody(req)); } catch {
       return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON' } });
@@ -418,7 +427,10 @@ async function route(req, res) {
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'messages must be a non-empty array' } });
     }
-    const result = await handleMessages(body, { callerKey: callerKeyFromRequest(req, extractToken(req), body) });
+    if (!isDevinSessionModel(body.model) && !isAuthenticated()) {
+      return json(res, 503, { type: 'error', error: { type: 'api_error', message: 'No active accounts' } });
+    }
+    const result = await handleMessages(body, { callerKey: callerKeyFromRequest(req, extractToken(req), body), headers: req.headers });
     const anthropicHeaders = {
       'request-id': 'req-' + randomUUID(),
       'anthropic-model': body.model || '',

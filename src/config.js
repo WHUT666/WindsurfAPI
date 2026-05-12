@@ -91,6 +91,25 @@ export const config = {
 
   // Proxy testing
   allowPrivateProxyHosts: process.env.ALLOW_PRIVATE_PROXY_HOSTS === '1',
+
+  // Devin Sessions provider (https://docs.devin.ai/api-reference/overview)
+  // Optional upstream that wraps Cognition's official Devin REST API as
+  // an OpenAI-compatible /v1/chat/completions endpoint. Independent of
+  // the Windsurf account pool — set DEVIN_API_KEY to enable.
+  devinApiKey: process.env.DEVIN_API_KEY || '',
+  devinApiBase: process.env.DEVIN_API_BASE || 'https://api.devin.ai',
+  devinDefaultSnapshotId: process.env.DEVIN_DEFAULT_SNAPSHOT_ID || '',
+  devinDefaultPlaybookId: process.env.DEVIN_DEFAULT_PLAYBOOK_ID || '',
+  // Poll cadence and wall-clock cap for synchronous chat completions.
+  // Devin sessions are async tasks; we poll the GET /v1/sessions/{id}
+  // endpoint every devinPollIntervalMs until a terminal status is reached
+  // or devinMaxWaitMs elapses.
+  devinPollIntervalMs: parseInt(process.env.DEVIN_POLL_INTERVAL_MS || '2000', 10),
+  devinMaxWaitMs: parseInt(process.env.DEVIN_MAX_WAIT_MS || '600000', 10),
+  // Fingerprint-based session reuse cache (process-local; X-Devin-Session-Id
+  // header always overrides).
+  devinSessionCacheTtlMs: parseInt(process.env.DEVIN_SESSION_CACHE_TTL_MS || String(60 * 60 * 1000), 10),
+  devinSessionCacheMaxEntries: parseInt(process.env.DEVIN_SESSION_CACHE_MAX_ENTRIES || '1000', 10),
 };
 
 const levels = { debug: 0, info: 1, warn: 2, error: 3 };

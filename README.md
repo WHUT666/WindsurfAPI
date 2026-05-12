@@ -269,6 +269,10 @@ curl http://localhost:3003/v1/messages \
 | `LS_PORT` | `42100` | LS gRPC 端口 |
 | `DASHBOARD_PASSWORD` | 空 | 后台密码 留空不设密码 |
 | `ALLOW_PRIVATE_PROXY_HOSTS` | 空 | 设为 `1` 允许在代理测试和登录时使用内网 IP（如 `192.168.x.x`、`10.x.x.x`）。默认留空仅允许公网地址 |
+| `DEVIN_API_KEY` | 空 | 填了就启用 Devin Sessions provider（`devin` / `devin-fast` / `devin-deep` 模型）。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md) |
+| `DEVIN_API_BASE` | `https://api.devin.ai` | Devin Enterprise 自定义 base URL |
+| `DEVIN_POLL_INTERVAL_MS` / `DEVIN_MAX_WAIT_MS` | `2000` / `600000` | Devin session 同步等待的轮询间隔和总超时 |
+| `DEVIN_DEFAULT_SNAPSHOT_ID` / `DEVIN_DEFAULT_PLAYBOOK_ID` | 空 | 给每个 Devin session 默认带上的 snapshot / playbook，可被请求 `metadata.devin_snapshot_id` / `devin_playbook_id` 覆盖 |
 
 ## Dashboard 功能面板
 
@@ -321,6 +325,19 @@ gemini-2.5-pro / flash · gemini-3.0-pro / flash（minimal / low / medium / high
 <summary><b>Windsurf 自家 + Arena</b></summary>
 
 swe-1.5 / 1.5-fast / 1.6 / 1.6-fast · arena-fast · arena-smart
+
+</details>
+
+<details>
+<summary><b>Devin Sessions（可选，需 <code>DEVIN_API_KEY</code>）</b></summary>
+
+把 Cognition Devin 官方 REST API（[docs](https://docs.devin.ai/api-reference/overview)）包成 OpenAI / Anthropic 兼容端点。**完全独立于 Windsurf 账号池**，用你自己的 Devin org ACU 跑：
+
+- `devin` — Devin 默认 ACU 预算
+- `devin-fast` — `max_acu_limit=5`，短任务 / 单次问答
+- `devin-deep` — `max_acu_limit=50`，长任务 / 复杂调研
+
+支持自动指纹续聊（同一段 OpenAI history → 同一 Devin session）和 `X-Devin-Session-Id` header 手动覆盖。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md)。
 
 </details>
 

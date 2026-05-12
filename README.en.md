@@ -278,6 +278,10 @@ In your client's settings for **Custom OpenAI Compatible**:
 | `LS_DATA_DIR` | Linux: `/opt/windsurf/data`; macOS: `~/.windsurf/data` | Per-proxy LS data directory root. |
 | `DASHBOARD_PASSWORD` | empty | Dashboard password. Leave empty for no password. |
 | `ALLOW_PRIVATE_PROXY_HOSTS` | empty | Set to `1` to allow private/internal IPs (e.g., `192.168.x.x`, `10.x.x.x`) in proxy tests and login. Leave empty to only allow public addresses (default). |
+| `DEVIN_API_KEY` | empty | Enables the Devin Sessions provider (`devin` / `devin-fast` / `devin-deep` models). Full guide: [`docs/devin-provider.md`](docs/devin-provider.md). |
+| `DEVIN_API_BASE` | `https://api.devin.ai` | Override only if you're on Devin Enterprise with a custom host. |
+| `DEVIN_POLL_INTERVAL_MS` / `DEVIN_MAX_WAIT_MS` | `2000` / `600000` | Polling cadence and wall-clock cap for the synchronous Devin session wrapper. |
+| `DEVIN_DEFAULT_SNAPSHOT_ID` / `DEVIN_DEFAULT_PLAYBOOK_ID` | empty | Defaults applied to every Devin session; per-request overrides via `metadata.devin_snapshot_id` / `devin_playbook_id`. |
 | `CASCADE_REUSE_STRICT` | `0` | Set to `1` for strict conversation reuse mode (waits for same fingerprint). |
 | `CASCADE_REUSE_STRICT_RETRY_MS` | `60000` | Retry delay in ms for strict reuse mode. |
 | `CASCADE_REUSE_HASH_SYSTEM` | `0` | Set to `1` to include system messages in conversation reuse hash. |
@@ -333,6 +337,19 @@ gemini-2.5-pro / flash · gemini-3.0-pro / flash (minimal / low / medium / high 
 <summary><b>Windsurf in-house + Arena</b></summary>
 
 swe-1.5 / 1.5-fast / 1.6 / 1.6-fast · arena-fast · arena-smart
+
+</details>
+
+<details>
+<summary><b>Devin Sessions (optional, requires <code>DEVIN_API_KEY</code>)</b></summary>
+
+Wraps Cognition's official Devin REST API ([docs](https://docs.devin.ai/api-reference/overview)) behind OpenAI / Anthropic endpoints. Completely independent of the Windsurf account pool — uses your own Devin API key and bills against your Devin org ACU budget:
+
+- `devin` — default Devin ACU budget
+- `devin-fast` — `max_acu_limit=5`, short tasks / single-turn Q&A
+- `devin-deep` — `max_acu_limit=50`, long-running tasks
+
+Supports automatic fingerprint-based session reuse (the same OpenAI history continues the same Devin session) and an `X-Devin-Session-Id` header to pin sessions manually. Full guide: [`docs/devin-provider.md`](docs/devin-provider.md).
 
 </details>
 
