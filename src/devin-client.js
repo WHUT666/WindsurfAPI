@@ -134,6 +134,15 @@ export const ACTIVE_STATUSES = new Set(['working', 'resumed', 'resume_requested'
  * Poll a session until it reaches a terminal status, an abort signal fires,
  * or the timeout elapses.
  *
+ * When `progressDetector` is provided, the loop will NOT treat a terminal
+ * status as final until the detector returns true for the polled session.
+ * This handles the follow-up case: right after `sendMessage` the Devin API
+ * may insert the new user_message into the session immediately while still
+ * reporting status_enum=blocked from the prior turn. A naive event-after-
+ * cursor check would exit before the actual assistant reply lands; the
+ * detector lets the caller demand a meaningful state change (e.g., a new
+ * assistant message after a given cursor).
+ *
  * @param {string} sessionId
  * @param {object} opts
  * @param {number} [opts.intervalMs]
@@ -141,12 +150,16 @@ export const ACTIVE_STATUSES = new Set(['working', 'resumed', 'resume_requested'
  * @param {AbortSignal} [opts.signal]
  * @param {string} [opts.apiKey]
  * @param {(session: object) => void} [opts.onProgress] - Called after every successful poll.
+ * @param {(session: object) => boolean} [opts.progressDetector] - Returns true
+ *   when this poll's session contains the progress the caller is waiting for.
+ *   Terminal exit is suppressed until it returns true.
  * @returns {Promise<{session: object, timedOut: boolean}>}
  */
 export async function pollUntilTerminal(sessionId, opts = {}) {
   const intervalMs = Math.max(250, opts.intervalMs ?? config.devinPollIntervalMs);
   const maxWaitMs = Math.max(intervalMs, opts.maxWaitMs ?? config.devinMaxWaitMs);
   const deadline = Date.now() + maxWaitMs;
+  const detector = typeof opts.progressDetector === 'function' ? opts.progressDetector : null;
   let session = null;
   while (true) {
     if (opts.signal?.aborted) throw new DevinApiError('aborted', { status: 499 });
@@ -156,7 +169,9 @@ export async function pollUntilTerminal(sessionId, opts = {}) {
     }
     const statusEnum = session?.status_enum || null;
     if (statusEnum && TERMINAL_STATUSES.has(statusEnum)) {
-      return { session, timedOut: false };
+      if (!detector || detector(session)) {
+        return { session, timedOut: false };
+      }
     }
     if (Date.now() >= deadline) {
       return { session, timedOut: true };

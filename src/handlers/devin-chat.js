@@ -120,6 +120,45 @@ function tailUserMessage(messages) {
   return text || null;
 }
 
+/**
+ * Build a progressDetector predicate for pollUntilTerminal: returns true when
+ * the polled session has at least one assistant message after `cursor`. Used
+ * to suppress early exit when Devin reports status_enum=terminal but the
+ * session hasn't yet produced the actual reply for the new turn (the API
+ * inserts the new user_message synchronously, so naive "any-event-after"
+ * checks fire too early).
+ */
+function makeAssistantProgressDetector(cursor) {
+  return (session) => hasAssistantMessageAfter(session, cursor);
+}
+
+function hasAssistantMessageAfter(session, cursor) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  if (messages.length === 0) return false;
+  if (cursor == null) {
+    return messages.some((m) => m && ASSISTANT_MESSAGE_TYPES.has(m.type) && typeof m.message === 'string' && m.message.length > 0);
+  }
+  let past = false;
+  let found = false;
+  for (const ev of messages) {
+    if (!ev) continue;
+    if (!past) {
+      if (ev.event_id === cursor) past = true;
+      continue;
+    }
+    if (ASSISTANT_MESSAGE_TYPES.has(ev.type) && typeof ev.message === 'string' && ev.message.length > 0) {
+      found = true;
+      break;
+    }
+  }
+  // Cursor not found in current message list (Devin may have pruned older
+  // events) — be liberal: any assistant message in the list counts.
+  if (!past) {
+    return messages.some((m) => m && ASSISTANT_MESSAGE_TYPES.has(m.type) && typeof m.message === 'string' && m.message.length > 0);
+  }
+  return found;
+}
+
 /** Devin SessionMessage event types that represent assistant-side output. */
 const ASSISTANT_MESSAGE_TYPES = new Set([
   'devin_message',
@@ -236,11 +275,15 @@ async function resolveSession({ messages, callerKey, headers, modelKey, modelInf
   if (explicit) {
     log.info(`Devin: explicit session id from header session=${explicit.slice(0, 8)}`);
     const tail = tailUserMessage(messages);
+    let cursor = null;
     if (tail) {
       try {
+        // Snapshot event cursor BEFORE sending so the poll loop knows what's
+        // new vs. what was already in the session from a prior turn.
+        const snapshot = await getSession(explicit, { signal });
+        cursor = lastEventId(snapshot);
         const res = await sendMessage(explicit, tail, { signal });
         if (res && typeof res === 'object' && res.detail) {
-          // Session is suspended/finished — surface clean error
           throw new DevinApiError(`Devin session ${explicit} not running: ${res.detail}`, { status: 409 });
         }
       } catch (err) {
@@ -250,7 +293,7 @@ async function resolveSession({ messages, callerKey, headers, modelKey, modelInf
         throw err;
       }
     }
-    return { sessionId: explicit, source: 'header', cursor: null };
+    return { sessionId: explicit, source: 'header', cursor };
   }
 
   // Try fingerprint reuse — hash everything except the tail user message.
@@ -346,6 +389,7 @@ export async function handleDevinChat(body, context = {}) {
       const result = await pollUntilTerminal(sessionId, {
         signal: abortController.signal,
         onProgress: () => {},
+        progressDetector: makeAssistantProgressDetector(cursor),
       });
       session = result.session;
       const timedOut = result.timedOut;
@@ -422,9 +466,11 @@ export async function handleDevinChat(body, context = {}) {
       let fullText = '';
       let lastSession = null;
       let timedOut = false;
+      const initialCursor = cursor;
       try {
         const result = await pollUntilTerminal(sessionId, {
           signal: abortController.signal,
+          progressDetector: makeAssistantProgressDetector(initialCursor),
           onProgress: (session) => {
             lastSession = session;
             const { messages: newMsgs, newSinceEventId } = extractNewAssistantMessages(session, cursor);

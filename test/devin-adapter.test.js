@@ -352,20 +352,38 @@ describe('handleDevinChat (end-to-end, mocked fetch)', () => {
 
     let createCalls = 0;
     let messageTarget = null;
+    let getCalls = 0;
     installFetchStub({
       'POST /v1/sessions': async () => { createCalls++; return new Response('{}', { status: 200 }); },
       'POST /v1/sessions/devin-explicit/message': async ({ init }) => {
         messageTarget = JSON.parse(init.body);
         return new Response('', { status: 200 });
       },
-      'GET /v1/sessions/devin-explicit': async () => new Response(JSON.stringify({
-        session_id: 'devin-explicit',
-        status: 'finished', status_enum: 'finished',
-        messages: [
-          { type: 'user_message', event_id: 'u1', message: 'next', timestamp: 't' },
-          { type: 'devin_message', event_id: 'd1', message: 'overridden', timestamp: 't' },
-        ],
-      }), { status: 200 }),
+      'GET /v1/sessions/devin-explicit': async () => {
+        getCalls++;
+        // First GET is the pre-send snapshot (used to capture cursor)
+        if (getCalls === 1) {
+          return new Response(JSON.stringify({
+            session_id: 'devin-explicit',
+            status: 'blocked', status_enum: 'blocked',
+            messages: [
+              { type: 'user_message', event_id: 'u_prev', message: 'first', timestamp: 't' },
+              { type: 'devin_message', event_id: 'd_prev', message: 'previous reply', timestamp: 't' },
+            ],
+          }), { status: 200 });
+        }
+        // Subsequent polls return the new turn's events after the cursor
+        return new Response(JSON.stringify({
+          session_id: 'devin-explicit',
+          status: 'finished', status_enum: 'finished',
+          messages: [
+            { type: 'user_message', event_id: 'u_prev', message: 'first', timestamp: 't' },
+            { type: 'devin_message', event_id: 'd_prev', message: 'previous reply', timestamp: 't' },
+            { type: 'user_message', event_id: 'u1', message: 'next', timestamp: 't' },
+            { type: 'devin_message', event_id: 'd1', message: 'overridden', timestamp: 't' },
+          ],
+        }), { status: 200 });
+      },
     });
     const result = await handleDevinChat(
       { model: 'devin', messages: [
@@ -403,6 +421,55 @@ describe('handleDevinChat (end-to-end, mocked fetch)', () => {
     assert.equal(result.status, 200);
     assert.equal(createCalls, 1);
     assert.match(result.body.choices[0].message.content, /fresh/);
+  });
+
+  it('header path keeps polling when Devin still shows stale terminal status (cursor unchanged)', async () => {
+    // Regression: real Devin sessions can briefly continue to report
+    // status_enum=blocked AFTER we send a follow-up message, before the state
+    // machine transitions back to working. Without the cursor-progress
+    // requirement we would return the previous turn's assistant text.
+    let getCalls = 0;
+    installFetchStub({
+      'POST /v1/sessions/devin-pin/message': async () => new Response('', { status: 200 }),
+      'GET /v1/sessions/devin-pin': async () => {
+        getCalls++;
+        if (getCalls === 1) {
+          // pre-send snapshot
+          return new Response(JSON.stringify({
+            session_id: 'devin-pin', status: 'blocked', status_enum: 'blocked',
+            messages: [
+              { type: 'devin_message', event_id: 'd_old', message: 'old answer', timestamp: 't' },
+            ],
+          }), { status: 200 });
+        }
+        if (getCalls < 4) {
+          // Devin still shows the stale terminal state immediately after send
+          return new Response(JSON.stringify({
+            session_id: 'devin-pin', status: 'blocked', status_enum: 'blocked',
+            messages: [
+              { type: 'devin_message', event_id: 'd_old', message: 'old answer', timestamp: 't' },
+            ],
+          }), { status: 200 });
+        }
+        // Eventually the new event lands
+        return new Response(JSON.stringify({
+          session_id: 'devin-pin', status: 'finished', status_enum: 'finished',
+          messages: [
+            { type: 'devin_message', event_id: 'd_old', message: 'old answer', timestamp: 't' },
+            { type: 'user_message', event_id: 'u1', message: 'follow-up', timestamp: 't' },
+            { type: 'devin_message', event_id: 'd_new', message: 'fresh answer', timestamp: 't' },
+          ],
+        }), { status: 200 });
+      },
+    });
+    const result = await handleDevinChat(
+      { model: 'devin', messages: [{ role: 'user', content: 'follow-up' }] },
+      { headers: { 'x-devin-session-id': 'devin-pin' } },
+    );
+    assert.equal(result.status, 200);
+    assert.equal(result.body.choices[0].finish_reason, 'stop');
+    assert.doesNotMatch(result.body.choices[0].message.content, /old answer/, 'must not surface stale assistant text from prior turn');
+    assert.match(result.body.choices[0].message.content, /fresh answer/);
   });
 
   it('returns finish_reason=length when polling times out without terminal status', async () => {
