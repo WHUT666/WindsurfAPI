@@ -9,7 +9,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveModel, getModelInfo } from '../src/models.js';
+import { resolveModel, getModelInfo, parseDevinAcuAlias } from '../src/models.js';
 import { clear as cacheClear, fingerprint, lookup, store, size as cacheSize } from '../src/devin-session-cache.js';
 import { createSession, getSession, sendMessage, pollUntilTerminal, DevinApiError, TERMINAL_STATUSES } from '../src/devin-client.js';
 import { messagesToPrompt, contentToText, tailUserMessage, extractNewAssistantMessages, lastEventId, handleDevinChat } from '../src/handlers/devin-chat.js';
@@ -80,6 +80,54 @@ describe('Devin model registration', () => {
     assert.equal(getModelInfo('devin').devinMaxAcu, undefined);
     assert.equal(getModelInfo('devin-fast').devinMaxAcu, 5);
     assert.equal(getModelInfo('devin-deep').devinMaxAcu, 50);
+  });
+
+  it('registers tiered aliases low/medium/high/xhigh/max with the expected ACU budgets', () => {
+    const tiers = [
+      ['devin-low', 2],
+      ['devin-medium', 5],
+      ['devin-high', 20],
+      ['devin-xhigh', 50],
+      ['devin-max', 100],
+    ];
+    for (const [name, expected] of tiers) {
+      assert.equal(resolveModel(name), name);
+      const info = getModelInfo(name);
+      assert.ok(info, `${name} is missing from MODELS`);
+      assert.equal(info.provider, 'devin-sessions');
+      assert.equal(info.devinMaxAcu, expected);
+    }
+  });
+
+  it('parseDevinAcuAlias accepts devin-acu-<N> with clamping and rejects garbage', () => {
+    assert.deepEqual(parseDevinAcuAlias('devin-acu-7'), { key: 'devin-acu-7', maxAcu: 7 });
+    assert.deepEqual(parseDevinAcuAlias('DEVIN-ACU-30'), { key: 'devin-acu-30', maxAcu: 30 });
+    assert.deepEqual(parseDevinAcuAlias('devin-acu-99999'), { key: 'devin-acu-10000', maxAcu: 10000 });
+    assert.equal(parseDevinAcuAlias('devin-acu-0'), null);
+    assert.equal(parseDevinAcuAlias('devin-acu-abc'), null);
+    assert.equal(parseDevinAcuAlias('devin-acu-'), null);
+    assert.equal(parseDevinAcuAlias('devin'), null);
+    assert.equal(parseDevinAcuAlias(null), null);
+  });
+
+  it('resolveModel synthesises devin-acu-<N> entries via getModelInfo', () => {
+    assert.equal(resolveModel('devin-acu-12'), 'devin-acu-12');
+    const info = getModelInfo('devin-acu-12');
+    assert.ok(info);
+    assert.equal(info.provider, 'devin-sessions');
+    assert.equal(info.devinMaxAcu, 12);
+    assert.equal(info.synthetic, true);
+    // The synthetic entry is NOT installed into the static MODELS map —
+    // a second lookup re-synthesises a fresh object so accidental
+    // mutation can't poison the catalog.
+    const second = getModelInfo('devin-acu-12');
+    assert.notStrictEqual(info, second);
+    assert.equal(second.devinMaxAcu, 12);
+  });
+
+  it('resolveModel returns the raw string for non-devin garbage so logs still show what the client sent', () => {
+    assert.equal(resolveModel('not-a-real-model'), 'not-a-real-model');
+    assert.equal(getModelInfo('not-a-real-model'), null);
   });
 });
 
@@ -295,6 +343,63 @@ describe('handleDevinChat (end-to-end, mocked fetch)', () => {
     assert.equal(createdParams.max_acu_limit, 5);
     // System message should be baked into the prompt
     assert.match(createdParams.prompt, /<system>\s*be terse/);
+  });
+
+  it('routes devin-acu-<N> dynamically and applies the parsed ACU budget', async () => {
+    let createdParams = null;
+    installFetchStub({
+      'POST /v1/sessions': async ({ init }) => {
+        createdParams = JSON.parse(init.body);
+        return new Response(JSON.stringify({ session_id: 'devin-acu', is_new_session: true }), { status: 200 });
+      },
+      'GET /v1/sessions/devin-acu': async () => new Response(JSON.stringify({
+        session_id: 'devin-acu',
+        status: 'finished', status_enum: 'finished',
+        messages: [
+          { type: 'user_message', event_id: 'u1', message: 'go', timestamp: 't' },
+          { type: 'devin_message', event_id: 'd1', message: 'done', timestamp: 't' },
+        ],
+      }), { status: 200 }),
+    });
+    const result = await handleDevinChat({ model: 'devin-acu-17', messages: [{ role: 'user', content: 'go' }] });
+    assert.equal(result.status, 200);
+    assert.equal(createdParams.max_acu_limit, 17);
+  });
+
+  it('plumbs metadata.devin_knowledge_ids / devin_tags / devin_secret_ids onto session create', async () => {
+    let createdParams = null;
+    installFetchStub({
+      'POST /v1/sessions': async ({ init }) => {
+        createdParams = JSON.parse(init.body);
+        return new Response(JSON.stringify({ session_id: 'devin-meta', is_new_session: true }), { status: 200 });
+      },
+      'GET /v1/sessions/devin-meta': async () => new Response(JSON.stringify({
+        session_id: 'devin-meta', status: 'finished', status_enum: 'finished',
+        messages: [
+          { type: 'user_message', event_id: 'u1', message: 'go', timestamp: 't' },
+          { type: 'devin_message', event_id: 'd1', message: 'ok', timestamp: 't' },
+        ],
+      }), { status: 200 }),
+    });
+    const result = await handleDevinChat({
+      model: 'devin-low',
+      messages: [{ role: 'user', content: 'go' }],
+      metadata: {
+        devin_knowledge_ids: ['kn-1', 'kn-2', ''],
+        devin_secret_ids: ['sec-1'],
+        devin_tags: ['triage', 'demo'],
+        devin_unlisted: true,
+        devin_idempotent: true,
+      },
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(createdParams.knowledge_ids, ['kn-1', 'kn-2']);   // empty string dropped
+    assert.deepEqual(createdParams.secret_ids, ['sec-1']);
+    assert.deepEqual(createdParams.tags, ['triage', 'demo']);
+    assert.equal(createdParams.unlisted, true);
+    assert.equal(createdParams.idempotent, true);
+    // devin-low contributes max_acu_limit=2
+    assert.equal(createdParams.max_acu_limit, 2);
   });
 
   it('reuses a cached session on a follow-up turn via fingerprint', async () => {

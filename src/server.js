@@ -32,6 +32,7 @@ import { config, log } from './config.js';
 import { VERSION } from './version.js';
 import { callerKeyFromRequest } from './caller-key.js';
 import { resolveModel, getModelInfo } from './models.js';
+import { handleDevinPassthrough } from './handlers/devin-passthrough.js';
 
 // Devin-sessions models don't use the Windsurf account pool — they
 // talk to api.devin.ai directly. When such a model is requested, skip
@@ -95,8 +96,8 @@ function json(res, status, body) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-devin-session-id, anthropic-version',
     // Per-request dynamic responses must not be cached by intermediaries.
     // Some upstream aggregators (e.g. sub2api, #97) priority-cache responses
     // when they don't see an explicit Cache-Control directive and serve
@@ -113,8 +114,8 @@ async function route(req, res) {
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, x-devin-session-id',
     });
     return res.end();
   }
@@ -325,6 +326,17 @@ async function route(req, res) {
 
   if (path === '/v1/models' && method === 'GET') {
     return json(res, 200, handleModels());
+  }
+
+  // ── Devin Cloud REST passthrough ───────────────────────
+  // Forwards every Devin endpoint that isn't wrapped by /v1/chat/completions
+  // (sessions list / terminate / tags, attachments, knowledge, playbooks,
+  // secrets) to api.devin.ai with the operator's DEVIN_API_KEY. The
+  // proxy's own API_KEY gate (above) still applies, so callers must be
+  // authenticated to the proxy. See handlers/devin-passthrough.js for the
+  // route allowlist and the streaming pipeline.
+  if (path.startsWith('/v1/devin/') || path === '/v1/devin') {
+    return handleDevinPassthrough(req, res);
   }
 
   if (path === '/v1/chat/completions' && method === 'POST') {

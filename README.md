@@ -269,7 +269,7 @@ curl http://localhost:3003/v1/messages \
 | `LS_PORT` | `42100` | LS gRPC 端口 |
 | `DASHBOARD_PASSWORD` | 空 | 后台密码 留空不设密码 |
 | `ALLOW_PRIVATE_PROXY_HOSTS` | 空 | 设为 `1` 允许在代理测试和登录时使用内网 IP（如 `192.168.x.x`、`10.x.x.x`）。默认留空仅允许公网地址 |
-| `DEVIN_API_KEY` | 空 | 填了就启用 Devin Sessions provider（`devin` / `devin-fast` / `devin-deep` 模型）。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md) |
+| `DEVIN_API_KEY` | 空 | 填了就启用 Devin Sessions provider 和 `/v1/devin/*` REST 反代（`devin` / `devin-low` / `devin-medium` / `devin-high` / `devin-xhigh` / `devin-max` / `devin-fast` / `devin-deep` / `devin-acu-<N>` 模型）。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md) |
 | `DEVIN_API_BASE` | `https://api.devin.ai` | Devin Enterprise 自定义 base URL |
 | `DEVIN_POLL_INTERVAL_MS` / `DEVIN_MAX_WAIT_MS` | `2000` / `600000` | Devin session 同步等待的轮询间隔和总超时 |
 | `DEVIN_DEFAULT_SNAPSHOT_ID` / `DEVIN_DEFAULT_PLAYBOOK_ID` | 空 | 给每个 Devin session 默认带上的 snapshot / playbook，可被请求 `metadata.devin_snapshot_id` / `devin_playbook_id` 覆盖 |
@@ -333,11 +333,19 @@ swe-1.5 / 1.5-fast / 1.6 / 1.6-fast · arena-fast · arena-smart
 
 把 Cognition Devin 官方 REST API（[docs](https://docs.devin.ai/api-reference/overview)）包成 OpenAI / Anthropic 兼容端点。**完全独立于 Windsurf 账号池**，用你自己的 Devin org ACU 跑：
 
-- `devin` — Devin 默认 ACU 预算
-- `devin-fast` — `max_acu_limit=5`，短任务 / 单次问答
-- `devin-deep` — `max_acu_limit=50`，长任务 / 复杂调研
+**模型清单（按 ACU 预算从低到高）：**
 
-支持自动指纹续聊（同一段 OpenAI history → 同一 Devin session）和 `X-Devin-Session-Id` header 手动覆盖。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md)。
+- `devin` — 让 Devin 自己决定 ACU 预算
+- `devin-low` — `max_acu_limit=2`，单轮快问快答
+- `devin-medium` *(= `devin-fast`)* — `max_acu_limit=5`，短任务 / 严格控制 ACU
+- `devin-high` — `max_acu_limit=20`，中型 feature
+- `devin-xhigh` *(= `devin-deep`)* — `max_acu_limit=50`，复杂调研
+- `devin-max` — `max_acu_limit=100`，多 PR 串联 / 大型重构
+- `devin-acu-<N>` — 动态别名，N 是 1~10000 的整数（例 `devin-acu-30`）
+
+**Devin Cloud REST 反代（`/v1/devin/*`）：** sessions / attachments / knowledge / playbooks / secrets 全套 CRUD 透传到 `api.devin.ai`，统一用 server 端 `DEVIN_API_KEY` 鉴权，客户端不需要也不能传 Devin token。
+
+支持自动指纹续聊（同一段 OpenAI history → 同一 Devin session）、`X-Devin-Session-Id` header 手动覆盖、`metadata.devin_*` 字段（max_acu / snapshot_id / playbook_id / knowledge_ids / secret_ids / tags / structured_output_schema 等）。完整说明见 [`docs/devin-provider.md`](docs/devin-provider.md)。
 
 </details>
 

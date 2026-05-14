@@ -219,7 +219,22 @@ export const MODELS = {
   // short-circuit into the Devin adapter. `credit: 0` means these models
   // don't participate in Windsurf ACU bookkeeping (they bill against
   // your Devin org ACU budget instead).
+  //
+  // The five tiered aliases (low / medium / high / xhigh / max) mirror
+  // the standard EFFORT_LADDER pattern used elsewhere in the catalog,
+  // so clients written against Anthropic / OpenAI tier conventions can
+  // pick a Devin budget without learning a Devin-specific vocabulary.
+  // `devin-fast` and `devin-deep` stay as user-visible synonyms for the
+  // medium / xhigh tiers respectively (preserves the v2.0.95 model
+  // names) — the alias map below points them at the same entries.
   'devin':                          { name: 'devin',                          provider: 'devin-sessions', enumValue: 0, credit: 0 },
+  'devin-low':                      { name: 'devin-low',                      provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 2 },
+  'devin-medium':                   { name: 'devin-medium',                   provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 5 },
+  'devin-high':                     { name: 'devin-high',                     provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 20 },
+  'devin-xhigh':                    { name: 'devin-xhigh',                    provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 50 },
+  'devin-max':                      { name: 'devin-max',                      provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 100 },
+  // Pre-existing aliases — kept verbatim so existing callers continue
+  // to work; they map to the matching tier under the hood.
   'devin-fast':                     { name: 'devin-fast',                     provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 5 },
   'devin-deep':                     { name: 'devin-deep',                     provider: 'devin-sessions', enumValue: 0, credit: 0, devinMaxAcu: 50 },
 };
@@ -417,15 +432,63 @@ const CURSOR_ALIASES = {
 };
 for (const [k, v] of Object.entries(CURSOR_ALIASES)) _lookup.set(k, v);
 
-/** Resolve user model name → internal model key. */
-export function resolveModel(name) {
-  if (!name) return null;
-  return _lookup.get(name) || _lookup.get(name.toLowerCase()) || name;
+// Dynamic `devin-acu-<N>` parser. Lets callers pick an arbitrary ACU
+// budget without hard-coding every value in the catalog. Returns
+//   { key, maxAcu }                          // valid
+//   null                                       // not a Devin ACU alias
+// The integer is clamped to [1, 10_000] — above 10k Devin will reject
+// the create-session anyway, but the clamp keeps surrounding code from
+// having to validate at every call site.
+export function parseDevinAcuAlias(name) {
+  if (!name || typeof name !== 'string') return null;
+  const m = /^devin-acu-(\d{1,5})$/i.exec(name.trim());
+  if (!m) return null;
+  let n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n > 10000) n = 10000;
+  return { key: `devin-acu-${n}`, maxAcu: n };
 }
 
-/** Get model info including enum and uid. */
+/** Resolve user model name → internal model key.
+ *
+ * Three paths:
+ *   1. Exact / lowercase match against the static alias table.
+ *   2. `devin-acu-<N>` dynamic alias (no catalog entry; synthesised by
+ *      getModelInfo).
+ *   3. Fallback: return the input verbatim so the rest of the pipeline
+ *      can still log the requested model.
+ */
+export function resolveModel(name) {
+  if (!name) return null;
+  const hit = _lookup.get(name) || _lookup.get(name.toLowerCase());
+  if (hit) return hit;
+  const dyn = parseDevinAcuAlias(name);
+  if (dyn) return dyn.key;
+  return name;
+}
+
+/** Get model info including enum and uid.
+ *
+ * Returns a synthesised entry for `devin-acu-<N>` so the rest of the
+ * proxy can treat dynamic ACU aliases as first-class Devin models
+ * (provider==='devin-sessions' → routed via handleDevinChat). The
+ * synthesised entry isn't shared between calls — it's a fresh literal
+ * per lookup so callers can't mutate the catalog.
+ */
 export function getModelInfo(id) {
-  return MODELS[id] || null;
+  if (MODELS[id]) return MODELS[id];
+  const dyn = parseDevinAcuAlias(id);
+  if (dyn) {
+    return {
+      name: dyn.key,
+      provider: 'devin-sessions',
+      enumValue: 0,
+      credit: 0,
+      devinMaxAcu: dyn.maxAcu,
+      synthetic: true,
+    };
+  }
+  return null;
 }
 
 // v2.0.84 (#118 0a00) — when an entire account pool is rate-limited

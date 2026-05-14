@@ -241,9 +241,21 @@ function lastEventId(session) {
 
 /**
  * Build the per-model Devin session params based on the resolved model.
- *   devin       → no overrides (Devin chooses ACU budget)
- *   devin-fast  → max_acu_limit = 5
- *   devin-deep  → max_acu_limit = 50
+ *
+ * Model → ACU mapping (precedence: low to high):
+ *   devin                → no override (Devin chooses)
+ *   devin-low            → max_acu_limit = 2
+ *   devin-medium / -fast → max_acu_limit = 5
+ *   devin-high           → max_acu_limit = 20
+ *   devin-xhigh / -deep  → max_acu_limit = 50
+ *   devin-max            → max_acu_limit = 100
+ *   devin-acu-<N>        → max_acu_limit = N (1 ≤ N ≤ 10000), see
+ *                          parseDevinAcuAlias in models.js
+ *   body.metadata.devin_max_acu (per-request) → wins over model alias
+ *
+ * Plus pass-through for snapshot_id / playbook_id / title /
+ * structured_output_schema / knowledge_ids / secret_ids / session_secrets
+ * / tags / unlisted via `body.metadata.devin_<field>` keys.
  */
 function deriveSessionParamsForModel(modelKey, info, body) {
   const params = {};
@@ -261,6 +273,26 @@ function deriveSessionParamsForModel(modelKey, info, body) {
   if (body?.metadata?.devin_structured_output_schema && typeof body.metadata.devin_structured_output_schema === 'object') {
     params.structured_output_schema = body.metadata.devin_structured_output_schema;
   }
+  // Extra Devin toolchain hooks. Allow OpenAI clients to wire knowledge
+  // entries / secrets / tags directly from a chat completions call so
+  // they don't have to detour through /v1/devin/* for every session.
+  if (Array.isArray(body?.metadata?.devin_knowledge_ids)) {
+    params.knowledge_ids = body.metadata.devin_knowledge_ids
+      .filter((s) => typeof s === 'string' && s).slice(0, 64);
+  }
+  if (Array.isArray(body?.metadata?.devin_secret_ids)) {
+    params.secret_ids = body.metadata.devin_secret_ids
+      .filter((s) => typeof s === 'string' && s).slice(0, 64);
+  }
+  if (body?.metadata?.devin_session_secrets && typeof body.metadata.devin_session_secrets === 'object') {
+    params.session_secrets = body.metadata.devin_session_secrets;
+  }
+  if (Array.isArray(body?.metadata?.devin_tags)) {
+    params.tags = body.metadata.devin_tags
+      .filter((s) => typeof s === 'string' && s).slice(0, 32);
+  }
+  if (body?.metadata?.devin_unlisted === true) params.unlisted = true;
+  if (body?.metadata?.devin_idempotent === true) params.idempotent = true;
   return params;
 }
 

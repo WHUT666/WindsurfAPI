@@ -3,17 +3,41 @@
 WindsurfAPI 可以选择性地把 [Cognition Devin](https://devin.ai) 的官方 REST API 包装成 OpenAI / Anthropic 兼容端点 —— 让任何已经在用 `/v1/chat/completions` 或 `/v1/messages` 的客户端（OpenAI SDK / Anthropic SDK / Claude Code / Cursor / Cline）也能直接驱动 Devin session。
 
 > ⚠️ 该 provider **完全独立于 Windsurf 账号池**：用的是你自己的 Devin API key、消耗你自己的 Devin org ACU 预算。Windsurf 账号是否登录、Language Server 是否启动，都不影响它。
-> 没有 `DEVIN_API_KEY` 时，`devin*` 三个模型不会出现在 `/v1/models` 里，也不会触发任何上游调用。
+> 没有 `DEVIN_API_KEY` 时，所有 `devin*` 模型都不会出现在 `/v1/models` 里，`/v1/devin/*` 反代路由也会统一回 503 `configuration_error`，不会触发任何上游调用。
 
 ## 模型清单
 
-| 模型名         | `max_acu_limit` 默认 | 适用场景                                                          |
-| -------------- | -------------------- | ----------------------------------------------------------------- |
-| `devin`        | 由 Devin 决定        | 一般 agent 任务，让 Devin 自己估算预算                            |
-| `devin-fast`   | `5`                  | 短任务 / 单次问答 / 想严格控制 ACU 消耗的场景                     |
-| `devin-deep`   | `50`                 | 大型 refactor / 复杂调研 / 你愿意烧 ACU 让它跑久一点的场景         |
+| 模型名             | `max_acu_limit` 默认 | 适用场景                                                          |
+| ------------------ | -------------------- | ----------------------------------------------------------------- |
+| `devin`            | 由 Devin 决定        | 一般 agent 任务，让 Devin 自己估算预算                            |
+| `devin-low`        | `2`                  | 单轮快问快答、一次性脚本检查                                      |
+| `devin-medium` *(= `devin-fast`)* | `5`     | 短任务 / 单次问答 / 想严格控制 ACU 消耗的场景                     |
+| `devin-high`       | `20`                 | 中型 feature、跨 3-5 个文件的小型 refactor                        |
+| `devin-xhigh` *(= `devin-deep`)*   | `50`    | 大型 refactor / 复杂调研                                          |
+| `devin-max`        | `100`                | 多 PR 串联、需要长时间跑的复杂任务                                |
+| `devin-acu-<N>`    | `<N>`                | 动态别名：把 N 替换成 1~10000 的整数，例 `devin-acu-30`           |
 
-如果想在不重写代码的情况下临时改 `max_acu_limit`，在请求体的 `metadata.devin_max_acu` 里塞一个正整数就行（OpenAI body 原生支持 `metadata`）。
+两组命名是等价的：`devin-fast` 和 `devin-medium` 走同一份 ACU 配额，`devin-deep` 和 `devin-xhigh` 同理。新代码推荐用 `low/medium/high/xhigh/max` 这套对称命名（与 EFFORT_LADDER 一致），老代码继续用 `devin-fast` / `devin-deep` 也完全 OK。
+
+如果想在不重写代码的情况下临时改 `max_acu_limit`，在请求体的 `metadata.devin_max_acu` 里塞一个正整数就行（OpenAI body 原生支持 `metadata`），或者直接用 `model: devin-acu-N` 动态别名 —— 动态别名不需要在 `/v1/models` 里有对应条目，但 `parseDevinAcuAlias` 会把它识别成 `devin-sessions` provider 并应用到 session。
+
+### 其它 metadata 传参
+
+通过 OpenAI body 的 `metadata` 字段还能直接驱动 Devin 的其它会话级参数 —— 不需要走 `/v1/devin/*` 单独建 session：
+
+| `metadata.*`                       | 上游字段                          | 说明                                                                 |
+| ---------------------------------- | --------------------------------- | -------------------------------------------------------------------- |
+| `devin_max_acu`                    | `max_acu_limit`                   | 覆盖模型自带的 ACU 上限                                              |
+| `devin_snapshot_id`                | `snapshot_id`                     | 指定环境快照 id（覆盖 `DEVIN_DEFAULT_SNAPSHOT_ID`）                 |
+| `devin_playbook_id`                | `playbook_id`                     | 指定 playbook id（覆盖 `DEVIN_DEFAULT_PLAYBOOK_ID`）                 |
+| `devin_title`                      | `title`                           | session 标题，方便在 Devin dashboard 里识别                          |
+| `devin_structured_output_schema`   | `structured_output_schema`        | 结构化输出 schema，session 终态会带在 `x_devin.structured_output` 里 |
+| `devin_knowledge_ids` (array)      | `knowledge_ids`                   | 给 session 注入指定的 knowledge 条目（最多 64 条，空字符串会被剔除）|
+| `devin_secret_ids` (array)         | `secret_ids`                      | 注入指定的 org-level secret（最多 64 条）                            |
+| `devin_session_secrets` (object)   | `session_secrets`                 | 仅本次 session 生效的 key/value secret                               |
+| `devin_tags` (array)               | `tags`                            | session tag，最多 32 条                                              |
+| `devin_unlisted: true`             | `unlisted`                        | 不出现在公开 list                                                    |
+| `devin_idempotent: true`           | `idempotent`                      | Devin 端的幂等创建                                                   |
 
 ## 环境变量
 
@@ -119,6 +143,59 @@ msg = client.messages.create(
     messages=[{"role": "user", "content": "summarize https://github.com/WHUT666/WindsurfAPI"}],
 )
 print(msg.content[0].text)
+```
+
+## Devin Cloud REST 工具链反代（`/v1/devin/*`）
+
+除了把 chat completions 翻译给 Devin 之外，WindsurfAPI 还在 `/v1/devin/*` 下挂了 Devin Cloud 的完整 REST 工具链，方便不想自己管 `DEVIN_API_KEY` 的客户端把 sessions / attachments / knowledge / playbooks / secrets 的 CRUD 也走这一个代理：
+
+| 路由                                          | 方法              | 上游                                  |
+| --------------------------------------------- | ----------------- | ------------------------------------- |
+| `/v1/devin/sessions`                          | `GET` / `POST`    | `/v1/sessions`                        |
+| `/v1/devin/sessions/:id`                      | `GET` / `DELETE`  | `/v1/sessions/{id}`                   |
+| `/v1/devin/sessions/:id/message`              | `POST`            | `/v1/sessions/{id}/message`           |
+| `/v1/devin/sessions/:id/tags`                 | `POST` / `PUT`    | `/v1/sessions/{id}/tags`              |
+| `/v1/devin/attachments`                       | `POST` (multipart)| `/v1/attachments`                     |
+| `/v1/devin/attachments/:id/file`              | `GET`             | `/v1/attachments/{id}/file` (302 透传)|
+| `/v1/devin/knowledge`                         | `GET` / `POST`    | `/v1/knowledge`                       |
+| `/v1/devin/knowledge/:id`                     | `PATCH` / `PUT` / `DELETE` | `/v1/knowledge/{id}`         |
+| `/v1/devin/playbooks`                         | `GET` / `POST`    | `/v1/playbooks`                       |
+| `/v1/devin/playbooks/:id`                     | `GET` / `PATCH` / `PUT` / `DELETE` | `/v1/playbooks/{id}` |
+| `/v1/devin/secrets`                           | `GET` / `POST`    | `/v1/secrets`                         |
+| `/v1/devin/secrets/:id`                       | `DELETE`          | `/v1/secrets/{id}`                    |
+
+关键行为：
+
+- 所有路由都用 server 端的 `DEVIN_API_KEY` 作为上游 Bearer token，**客户端不需要、也不能传 Devin token**（防止凭证泄漏给反代消费方）。
+- 仍受 proxy 自己的 `API_KEY` 网关保护（和 `/v1/chat/completions` 同一把锁）。
+- multipart 上传是流式的，10 MB 内不缓冲；attachment 下载默认返回上游 302 让客户端直拉 presigned URL。
+- 上游非 2xx 的响应体（Devin 的 JSON 错误详情）原样透传过来，方便客户端按 4xx/5xx 处理。
+- `DEVIN_API_KEY` 没设的时候这些路由统一回 503 `configuration_error`。
+- 路由白名单写死在 `src/handlers/devin-passthrough.js` 的 `ALLOWED_ROUTES` 里，未列出的 Devin endpoint 会回 404 —— 新增 endpoint 必须显式登记。
+
+示例：
+
+```bash
+# 上传一份 README 给 Devin 作为后续 session 的 attachment
+curl -s http://localhost:3003/v1/devin/attachments \
+  -H "Authorization: Bearer $API_KEY" \
+  -F file=@README.md
+
+# 列最近的 session
+curl -s http://localhost:3003/v1/devin/sessions?limit=20 \
+  -H "Authorization: Bearer $API_KEY" | jq .
+
+# 给已有 session 加 tag
+curl -s http://localhost:3003/v1/devin/sessions/devin-abc123/tags \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"tags":["triage","demo"]}'
+
+# 写一条 knowledge
+curl -s http://localhost:3003/v1/devin/knowledge \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"deploy","contents":"npm run deploy","trigger":"When deploying"}'
 ```
 
 ## 限制与注意
