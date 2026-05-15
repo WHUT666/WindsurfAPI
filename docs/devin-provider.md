@@ -147,7 +147,9 @@ print(msg.content[0].text)
 
 ## Devin Cloud REST 工具链反代（`/v1/devin/*`）
 
-除了把 chat completions 翻译给 Devin 之外，WindsurfAPI 还在 `/v1/devin/*` 下挂了 Devin Cloud 的完整 REST 工具链，方便不想自己管 `DEVIN_API_KEY` 的客户端把 sessions / attachments / knowledge / playbooks / secrets 的 CRUD 也走这一个代理：
+除了把 chat completions 翻译给 Devin 之外，WindsurfAPI 还在 `/v1/devin/*` 下挂了 Devin Cloud 的完整 REST 工具链，方便不想自己管 `DEVIN_API_KEY` 的客户端把 sessions / attachments / knowledge / playbooks / secrets / 以及 v3 RBAC 和 v2 enterprise 已发布的 admin / audit / consumption 接口都走这一个代理。总共白名单一百多条路由，全部定义在 `src/handlers/devin-passthrough.js` 的 `ALLOWED_ROUTES` 中。
+
+### v1 （legacy，默认挂载名下；API key 需以 `apk_` / `apk_user_` 开头）
 
 | 路由                                          | 方法              | 上游                                  |
 | --------------------------------------------- | ----------------- | ------------------------------------- |
@@ -163,6 +165,72 @@ print(msg.content[0].text)
 | `/v1/devin/playbooks/:id`                     | `GET` / `PATCH` / `PUT` / `DELETE` | `/v1/playbooks/{id}` |
 | `/v1/devin/secrets`                           | `GET` / `POST`    | `/v1/secrets`                         |
 | `/v1/devin/secrets/:id`                       | `DELETE`          | `/v1/secrets/{id}`                    |
+
+### v3 organizations（当前主推 API，RBAC / service-user token 以 `cog_` 开头）
+
+全部路由都需要在客户端 URL 中显式带上 `org_id`，代理不会从 API key 中推断 —— 企业版下同一个 service-user token 可以跨 org 生效。
+
+| 路由                                                                          | 方法                                       |
+| ----------------------------------------------------------------------------- | ------------------------------------------ |
+| `/v1/devin/v3/organizations/:org_id/sessions`                                 | `GET` / `POST`                             |
+| `/v1/devin/v3/organizations/:org_id/sessions/insights`                        | `GET`                                      |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id`                       | `GET` / `DELETE`                           |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/messages`              | `POST`                                     |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/tags`                  | `POST` / `DELETE`                          |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/archive`               | `POST`                                     |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/attachments`           | `POST` (multipart)                         |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/insights/generate`     | `POST`                                     |
+| `/v1/devin/v3/organizations/:org_id/knowledge/notes`                          | `GET` / `POST`                             |
+| `/v1/devin/v3/organizations/:org_id/knowledge/notes/:note_id`                 | `GET` / `PATCH` / `PUT` / `DELETE`         |
+| `/v1/devin/v3/organizations/:org_id/playbooks`                                | `GET` / `POST`                             |
+| `/v1/devin/v3/organizations/:org_id/playbooks/:playbook_id`                   | `GET` / `PATCH` / `PUT` / `DELETE`         |
+| `/v1/devin/v3/organizations/:org_id/secrets`                                  | `GET` / `POST`                             |
+| `/v1/devin/v3/organizations/:org_id/secrets/:secret_id`                       | `DELETE`                                   |
+| `/v1/devin/v3/organizations/:org_id/attachments`                              | `POST` (multipart)                         |
+| `/v1/devin/v3/organizations/:org_id/attachments/:attachment_id/file`         | `GET` (302 透传)                            |
+| `/v1/devin/v3/organizations/:org_id/service-users`                            | `GET` / `POST`                             |
+| `/v1/devin/v3/organizations/:org_id/service-users/:user_id`                   | `GET` / `DELETE`                           |
+| `/v1/devin/v3/organizations/:org_id/users`                                    | `GET`                                      |
+| `/v1/devin/v3/organizations/:org_id/users/:user_id`                           | `GET`                                      |
+
+### v3 enterprise（企业 admin跨 org 操作）
+
+| 路由                                                       | 方法                                   |
+| --------------------------------------------------------- | -------------------------------------- |
+| `/v1/devin/v3/enterprise/sessions`                        | `GET`                                  |
+| `/v1/devin/v3/enterprise/sessions/:devin_id`              | `GET`                                  |
+| `/v1/devin/v3/enterprise/knowledge/notes`                 | `GET` / `POST`                         |
+| `/v1/devin/v3/enterprise/knowledge/notes/:note_id`        | `GET` / `PATCH` / `PUT` / `DELETE`     |
+| `/v1/devin/v3/enterprise/playbooks`                       | `GET` / `POST`                         |
+| `/v1/devin/v3/enterprise/playbooks/:playbook_id`          | `GET` / `PATCH` / `PUT` / `DELETE`     |
+
+### v2 enterprise（legacy，计费 / audit / member 管理）
+
+v3 还没完全接管的部分都在 v2 上，这些路由需要 enterprise admin personal API key（`apk_user_` 且带 enterprise admin role）。
+
+| 路由                                                       | 方法             |
+| --------------------------------------------------------- | ---------------- |
+| `/v1/devin/v2/enterprise/audit-logs`                      | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/cycles`              | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/daily`               | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/user-daily`          | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/pr-metrics`          | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/sessions-metrics`    | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/searches-metrics`    | `GET`            |
+| `/v1/devin/v2/enterprise/consumption/usage-metrics`       | `GET`            |
+| `/v1/devin/v2/enterprise/api-keys`                        | `GET` / `POST` / `DELETE` (后者是 bulk revoke) |
+| `/v1/devin/v2/enterprise/api-keys/:key_id`                | `DELETE`         |
+| `/v1/devin/v2/enterprise/members`                         | `GET`            |
+| `/v1/devin/v2/enterprise/members/invite`                  | `POST`           |
+| `/v1/devin/v2/enterprise/members/roles`                   | `GET` / `PATCH`  |
+| `/v1/devin/v2/enterprise/members/roles/migrate`           | `POST`           |
+| `/v1/devin/v2/enterprise/members/organizations`           | `GET`            |
+| `/v1/devin/v2/enterprise/members/:member_id`              | `GET` / `DELETE` |
+| `/v1/devin/v2/enterprise/organizations`                   | `GET` / `POST`   |
+| `/v1/devin/v2/enterprise/groups`                          | `GET` / `POST`   |
+| `/v1/devin/v2/enterprise/groups/:group_id`                | `GET`            |
+| `/v1/devin/v2/enterprise/org-group-limits`                | `GET` / `PATCH`  |
+| `/v1/devin/v2/enterprise/infrastructure/hypervisors`      | `GET`            |
 
 关键行为：
 
@@ -196,6 +264,30 @@ curl -s http://localhost:3003/v1/devin/knowledge \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"name":"deploy","contents":"npm run deploy","trigger":"When deploying"}'
+
+# v3：帮某个用户创建一个 session（需要 ImpersonateOrgSessions 权限）
+curl -s http://localhost:3003/v1/devin/v3/organizations/org-abc/sessions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Fix issue #42","create_as_user_id":"user-zzz"}'
+
+# v3：给已有 session 发后续消息（注意是 messages 不是 message）
+curl -s http://localhost:3003/v1/devin/v3/organizations/org-abc/sessions/devin-xyz/messages \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"please retry with verbose logs"}'
+
+# v3：归档 session 以便后期查询
+curl -s -X POST http://localhost:3003/v1/devin/v3/organizations/org-abc/sessions/devin-xyz/archive \
+  -H "Authorization: Bearer $API_KEY"
+
+# v2：查看 enterprise 本周期的 ACU 消耗
+curl -s 'http://localhost:3003/v1/devin/v2/enterprise/consumption/cycles?limit=12' \
+  -H "Authorization: Bearer $API_KEY" | jq .
+
+# v2：拉近 30 天的 audit log
+curl -s 'http://localhost:3003/v1/devin/v2/enterprise/audit-logs?days=30' \
+  -H "Authorization: Bearer $API_KEY" | jq .
 ```
 
 ## 限制与注意

@@ -2,8 +2,9 @@
  * Devin Cloud REST passthrough — mounts every public Devin endpoint that
  * isn't already wrapped by the OpenAI-shaped /v1/chat/completions adapter
  * under `/v1/devin/*`, so callers can drive Devin's full toolchain
- * (sessions / attachments / knowledge / playbooks / secrets) through a
- * single endpoint without juggling two API keys client-side.
+ * (sessions / attachments / knowledge / playbooks / secrets / enterprise
+ * audit + consumption metrics) through a single endpoint without
+ * juggling two API keys client-side.
  *
  * Why this lives next to handlers/devin-chat.js
  * ────────────────────────────────────────────
@@ -13,6 +14,7 @@
  *   • list / terminate / tag sessions (cleanup, dashboards)
  *   • upload context attachments before starting a session
  *   • CRUD org knowledge entries, playbooks, secrets
+ *   • read consumption / audit logs at the enterprise level
  * Reimplementing those would add zero value — Devin's REST schema is
  * already stable. So this module pipes them through verbatim, only
  * inserting the operator's `DEVIN_API_KEY` as `Authorization: Bearer …`
@@ -21,8 +23,23 @@
  *
  * Routing
  * ───────
- *   /v1/devin/<rest>   →  https://api.devin.ai/v1/<rest>
- * Trailing query string and the HTTP method are preserved.
+ *   /v1/devin/<rest>   →  https://api.devin.ai/<rest>
+ *
+ * Three Devin API surfaces are exposed under this single mount:
+ *   • v1 (legacy, org-scoped via apk_* key): routes that start with
+ *     `/sessions`, `/attachments`, `/knowledge`, `/playbooks`, `/secrets`
+ *     (the v1 prefix is implied — kept for back-compat with the original
+ *     mount before v3 existed).
+ *   • v3 (current, RBAC + service-user tokens): routes that explicitly
+ *     start with `/v3/organizations/:org_id/...` or `/v3/enterprise/...`.
+ *     Callers must provide the org id themselves; the proxy does not
+ *     guess it from `DEVIN_API_KEY` because a single service-user token
+ *     may be scoped to multiple orgs in enterprise deployments.
+ *   • v2 (legacy enterprise, personal-key-only): routes under
+ *     `/v2/enterprise/...` for billing, consumption metrics, audit logs,
+ *     enterprise API key management. Kept because v3 hasn't fully
+ *     replaced these surfaces yet (consumption-cycles in particular).
+ * Trailing query string and the HTTP method are preserved verbatim.
  *
  * Body shaping
  * ────────────
@@ -51,9 +68,11 @@
  * Endpoint allowlist
  * ──────────────────
  * Anything not in ALLOWED_ROUTES returns 404 so a typo doesn't silently
- * pivot to an unintended Devin endpoint. The list mirrors the Devin v1
- * public surface from docs.devin.ai/llms.txt — sessions, attachments,
- * knowledge, playbooks, secrets.
+ * pivot to an unintended Devin endpoint. The list mirrors the public
+ * Devin API surfaces (v1, v3 organization + enterprise, v2 enterprise)
+ * from docs.devin.ai/llms.txt. Adding a new endpoint requires an
+ * explicit entry here — silent passthrough of unknown routes would
+ * expose any future preview endpoint the proxy operator hasn't audited.
  */
 
 import { config, log } from '../config.js';
@@ -102,6 +121,138 @@ const ALLOWED_ROUTES = [
   ['GET',    '/secrets',                     '/v1/secrets'],
   ['POST',   '/secrets',                     '/v1/secrets'],
   ['DELETE', '/secrets/:id',                 '/v1/secrets/${id}'],
+
+  // ─────────────────────────────────────────────────────────────────────
+  // v3 — current Devin API (service-user tokens, RBAC, org-scoped).
+  // Callers must include `/v3/organizations/<org_id>/...` in the path;
+  // we never guess org_id from the API key because a single service-user
+  // token may be valid across multiple orgs in enterprise deployments.
+  // Static segments (e.g. /sessions/insights) MUST come before capture
+  // patterns (e.g. /sessions/:devin_id) so the matcher returns the
+  // intended row when both have the same segment count.
+  // ─────────────────────────────────────────────────────────────────────
+
+  // v3 organizations — sessions (https://docs.devin.ai/api-reference/v3/sessions)
+  ['POST',   '/v3/organizations/:org_id/sessions',                              '/v3/organizations/${org_id}/sessions'],
+  ['GET',    '/v3/organizations/:org_id/sessions',                              '/v3/organizations/${org_id}/sessions'],
+  ['GET',    '/v3/organizations/:org_id/sessions/insights',                     '/v3/organizations/${org_id}/sessions/insights'],
+  ['GET',    '/v3/organizations/:org_id/sessions/:devin_id',                    '/v3/organizations/${org_id}/sessions/${devin_id}'],
+  ['DELETE', '/v3/organizations/:org_id/sessions/:devin_id',                    '/v3/organizations/${org_id}/sessions/${devin_id}'],
+  ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/messages',           '/v3/organizations/${org_id}/sessions/${devin_id}/messages'],
+  ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/tags',               '/v3/organizations/${org_id}/sessions/${devin_id}/tags'],
+  ['DELETE', '/v3/organizations/:org_id/sessions/:devin_id/tags',               '/v3/organizations/${org_id}/sessions/${devin_id}/tags'],
+  ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/archive',            '/v3/organizations/${org_id}/sessions/${devin_id}/archive'],
+  ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/attachments',        '/v3/organizations/${org_id}/sessions/${devin_id}/attachments'],
+  ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/insights/generate',  '/v3/organizations/${org_id}/sessions/${devin_id}/insights/generate'],
+
+  // v3 organizations — knowledge notes (org-scoped)
+  ['GET',    '/v3/organizations/:org_id/knowledge/notes',                       '/v3/organizations/${org_id}/knowledge/notes'],
+  ['POST',   '/v3/organizations/:org_id/knowledge/notes',                       '/v3/organizations/${org_id}/knowledge/notes'],
+  ['GET',    '/v3/organizations/:org_id/knowledge/notes/:note_id',              '/v3/organizations/${org_id}/knowledge/notes/${note_id}'],
+  ['PATCH',  '/v3/organizations/:org_id/knowledge/notes/:note_id',              '/v3/organizations/${org_id}/knowledge/notes/${note_id}'],
+  ['PUT',    '/v3/organizations/:org_id/knowledge/notes/:note_id',              '/v3/organizations/${org_id}/knowledge/notes/${note_id}'],
+  ['DELETE', '/v3/organizations/:org_id/knowledge/notes/:note_id',              '/v3/organizations/${org_id}/knowledge/notes/${note_id}'],
+
+  // v3 organizations — playbooks (org-scoped)
+  ['GET',    '/v3/organizations/:org_id/playbooks',                             '/v3/organizations/${org_id}/playbooks'],
+  ['POST',   '/v3/organizations/:org_id/playbooks',                             '/v3/organizations/${org_id}/playbooks'],
+  ['GET',    '/v3/organizations/:org_id/playbooks/:playbook_id',                '/v3/organizations/${org_id}/playbooks/${playbook_id}'],
+  ['PATCH',  '/v3/organizations/:org_id/playbooks/:playbook_id',                '/v3/organizations/${org_id}/playbooks/${playbook_id}'],
+  ['PUT',    '/v3/organizations/:org_id/playbooks/:playbook_id',                '/v3/organizations/${org_id}/playbooks/${playbook_id}'],
+  ['DELETE', '/v3/organizations/:org_id/playbooks/:playbook_id',                '/v3/organizations/${org_id}/playbooks/${playbook_id}'],
+
+  // v3 organizations — secrets (org-scoped)
+  ['GET',    '/v3/organizations/:org_id/secrets',                               '/v3/organizations/${org_id}/secrets'],
+  ['POST',   '/v3/organizations/:org_id/secrets',                               '/v3/organizations/${org_id}/secrets'],
+  ['DELETE', '/v3/organizations/:org_id/secrets/:secret_id',                    '/v3/organizations/${org_id}/secrets/${secret_id}'],
+
+  // v3 organizations — attachments (org-scoped). The legacy v1 surface
+  // also exposes /v1/attachments without org scope; both routes are
+  // listed so callers can pick whichever matches their API key tier.
+  ['POST',   '/v3/organizations/:org_id/attachments',                           '/v3/organizations/${org_id}/attachments'],
+  ['GET',    '/v3/organizations/:org_id/attachments/:attachment_id/file',      '/v3/organizations/${org_id}/attachments/${attachment_id}/file'],
+
+  // v3 organizations — service users (only the org-level ones; the
+  // enterprise mint endpoint lives under /v3/enterprise/* below).
+  ['GET',    '/v3/organizations/:org_id/service-users',                         '/v3/organizations/${org_id}/service-users'],
+  ['POST',   '/v3/organizations/:org_id/service-users',                         '/v3/organizations/${org_id}/service-users'],
+  ['GET',    '/v3/organizations/:org_id/service-users/:user_id',                '/v3/organizations/${org_id}/service-users/${user_id}'],
+  ['DELETE', '/v3/organizations/:org_id/service-users/:user_id',                '/v3/organizations/${org_id}/service-users/${user_id}'],
+
+  // v3 organizations — users (read-only org membership directory)
+  ['GET',    '/v3/organizations/:org_id/users',                                 '/v3/organizations/${org_id}/users'],
+  ['GET',    '/v3/organizations/:org_id/users/:user_id',                        '/v3/organizations/${org_id}/users/${user_id}'],
+
+  // ─────────────────────────────────────────────────────────────────────
+  // v3 enterprise — cross-org operations gated on enterprise admin role.
+  // Sessions / knowledge / playbooks have org-equivalent endpoints above;
+  // enterprise variants let an admin operate across every org in their
+  // enterprise with a single token.
+  // ─────────────────────────────────────────────────────────────────────
+
+  ['GET',    '/v3/enterprise/sessions',                                         '/v3/enterprise/sessions'],
+  ['GET',    '/v3/enterprise/sessions/:devin_id',                               '/v3/enterprise/sessions/${devin_id}'],
+
+  ['GET',    '/v3/enterprise/knowledge/notes',                                  '/v3/enterprise/knowledge/notes'],
+  ['POST',   '/v3/enterprise/knowledge/notes',                                  '/v3/enterprise/knowledge/notes'],
+  ['GET',    '/v3/enterprise/knowledge/notes/:note_id',                         '/v3/enterprise/knowledge/notes/${note_id}'],
+  ['PATCH',  '/v3/enterprise/knowledge/notes/:note_id',                         '/v3/enterprise/knowledge/notes/${note_id}'],
+  ['PUT',    '/v3/enterprise/knowledge/notes/:note_id',                         '/v3/enterprise/knowledge/notes/${note_id}'],
+  ['DELETE', '/v3/enterprise/knowledge/notes/:note_id',                         '/v3/enterprise/knowledge/notes/${note_id}'],
+
+  ['GET',    '/v3/enterprise/playbooks',                                        '/v3/enterprise/playbooks'],
+  ['POST',   '/v3/enterprise/playbooks',                                        '/v3/enterprise/playbooks'],
+  ['GET',    '/v3/enterprise/playbooks/:playbook_id',                           '/v3/enterprise/playbooks/${playbook_id}'],
+  ['PATCH',  '/v3/enterprise/playbooks/:playbook_id',                           '/v3/enterprise/playbooks/${playbook_id}'],
+  ['PUT',    '/v3/enterprise/playbooks/:playbook_id',                           '/v3/enterprise/playbooks/${playbook_id}'],
+  ['DELETE', '/v3/enterprise/playbooks/:playbook_id',                           '/v3/enterprise/playbooks/${playbook_id}'],
+
+  // ─────────────────────────────────────────────────────────────────────
+  // v2 enterprise — legacy admin surface (audit logs, consumption,
+  // billing, member management, enterprise API key provisioning).
+  // Kept whitelisted because v3 hasn't ported every endpoint yet; ops
+  // dashboards still need consumption-cycles for ACU budgeting.
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Audit + consumption (read-only)
+  ['GET',    '/v2/enterprise/audit-logs',                                       '/v2/enterprise/audit-logs'],
+  ['GET',    '/v2/enterprise/consumption/cycles',                               '/v2/enterprise/consumption/cycles'],
+  ['GET',    '/v2/enterprise/consumption/daily',                                '/v2/enterprise/consumption/daily'],
+  ['GET',    '/v2/enterprise/consumption/user-daily',                           '/v2/enterprise/consumption/user-daily'],
+  ['GET',    '/v2/enterprise/consumption/pr-metrics',                           '/v2/enterprise/consumption/pr-metrics'],
+  ['GET',    '/v2/enterprise/consumption/searches-metrics',                     '/v2/enterprise/consumption/searches-metrics'],
+  ['GET',    '/v2/enterprise/consumption/sessions-metrics',                     '/v2/enterprise/consumption/sessions-metrics'],
+  ['GET',    '/v2/enterprise/consumption/usage-metrics',                        '/v2/enterprise/consumption/usage-metrics'],
+
+  // API key management — provision / revoke single / revoke all
+  ['GET',    '/v2/enterprise/api-keys',                                         '/v2/enterprise/api-keys'],
+  ['POST',   '/v2/enterprise/api-keys',                                         '/v2/enterprise/api-keys'],
+  ['DELETE', '/v2/enterprise/api-keys',                                         '/v2/enterprise/api-keys'],
+  ['DELETE', '/v2/enterprise/api-keys/:key_id',                                 '/v2/enterprise/api-keys/${key_id}'],
+
+  // Members
+  ['GET',    '/v2/enterprise/members',                                          '/v2/enterprise/members'],
+  ['POST',   '/v2/enterprise/members/invite',                                   '/v2/enterprise/members/invite'],
+  ['POST',   '/v2/enterprise/members/roles/migrate',                            '/v2/enterprise/members/roles/migrate'],
+  ['PATCH',  '/v2/enterprise/members/roles',                                    '/v2/enterprise/members/roles'],
+  ['GET',    '/v2/enterprise/members/organizations',                            '/v2/enterprise/members/organizations'],
+  ['GET',    '/v2/enterprise/members/roles',                                    '/v2/enterprise/members/roles'],
+  ['GET',    '/v2/enterprise/members/:member_id',                               '/v2/enterprise/members/${member_id}'],
+  ['DELETE', '/v2/enterprise/members/:member_id',                               '/v2/enterprise/members/${member_id}'],
+
+  // Organizations + IdP groups
+  ['GET',    '/v2/enterprise/organizations',                                    '/v2/enterprise/organizations'],
+  ['POST',   '/v2/enterprise/organizations',                                    '/v2/enterprise/organizations'],
+  ['GET',    '/v2/enterprise/groups',                                           '/v2/enterprise/groups'],
+  ['POST',   '/v2/enterprise/groups',                                           '/v2/enterprise/groups'],
+  ['GET',    '/v2/enterprise/groups/:group_id',                                 '/v2/enterprise/groups/${group_id}'],
+
+  // Org group limits
+  ['GET',    '/v2/enterprise/org-group-limits',                                 '/v2/enterprise/org-group-limits'],
+  ['PATCH',  '/v2/enterprise/org-group-limits',                                 '/v2/enterprise/org-group-limits'],
+
+  // VPC / infrastructure visibility
+  ['GET',    '/v2/enterprise/infrastructure/hypervisors',                       '/v2/enterprise/infrastructure/hypervisors'],
 ];
 
 /**

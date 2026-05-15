@@ -106,7 +106,7 @@ describe('matchRoute', () => {
 
   it('matches every method/path tuple in ALLOWED_ROUTES exactly once', () => {
     for (const [method, pattern] of ALLOWED_ROUTES) {
-      const concrete = pattern.replace(':id', 'abc123');
+      const concrete = fillPattern(pattern);
       const got = matchRoute(method, concrete);
       assert.ok(got, `${method} ${concrete} should match`);
     }
@@ -124,7 +124,64 @@ describe('matchRoute', () => {
     assert.ok(got);
     assert.match(got.upstreamPath, /devin-abc%3Axyz/);
   });
+
+  it('routes /v3 organization paths to /v3/organizations/<org_id>/... upstream', () => {
+    const create = matchRoute('POST', '/v3/organizations/org-abc/sessions');
+    assert.deepEqual(create, { upstreamPath: '/v3/organizations/org-abc/sessions', params: { org_id: 'org-abc' } });
+
+    const get = matchRoute('GET', '/v3/organizations/org-abc/sessions/devin-xyz');
+    assert.deepEqual(get, {
+      upstreamPath: '/v3/organizations/org-abc/sessions/devin-xyz',
+      params: { org_id: 'org-abc', devin_id: 'devin-xyz' },
+    });
+
+    const msg = matchRoute('POST', '/v3/organizations/org-abc/sessions/devin-xyz/messages');
+    assert.equal(msg.upstreamPath, '/v3/organizations/org-abc/sessions/devin-xyz/messages');
+
+    const arch = matchRoute('POST', '/v3/organizations/org-abc/sessions/devin-xyz/archive');
+    assert.equal(arch.upstreamPath, '/v3/organizations/org-abc/sessions/devin-xyz/archive');
+
+    const insightsGen = matchRoute('POST', '/v3/organizations/org-abc/sessions/devin-xyz/insights/generate');
+    assert.equal(insightsGen.upstreamPath, '/v3/organizations/org-abc/sessions/devin-xyz/insights/generate');
+  });
+
+  it('prefers the static /sessions/insights row over the :devin_id capture', () => {
+    // Both rows have the same segment count (6) — the matcher must return
+    // the static one because it is listed earlier in ALLOWED_ROUTES.
+    const got = matchRoute('GET', '/v3/organizations/org-abc/sessions/insights');
+    assert.deepEqual(got, { upstreamPath: '/v3/organizations/org-abc/sessions/insights', params: { org_id: 'org-abc' } });
+  });
+
+  it('routes /v3 enterprise + /v2 enterprise paths verbatim', () => {
+    assert.deepEqual(matchRoute('GET', '/v3/enterprise/sessions'), { upstreamPath: '/v3/enterprise/sessions', params: {} });
+    assert.deepEqual(matchRoute('GET', '/v3/enterprise/playbooks/pb-1'), { upstreamPath: '/v3/enterprise/playbooks/pb-1', params: { playbook_id: 'pb-1' } });
+
+    assert.deepEqual(matchRoute('GET', '/v2/enterprise/audit-logs'), { upstreamPath: '/v2/enterprise/audit-logs', params: {} });
+    assert.deepEqual(matchRoute('GET', '/v2/enterprise/consumption/cycles'), { upstreamPath: '/v2/enterprise/consumption/cycles', params: {} });
+
+    // The static "members/organizations" row must win over the
+    // /members/:member_id capture even though both have 4 segments.
+    assert.deepEqual(matchRoute('GET', '/v2/enterprise/members/organizations'), { upstreamPath: '/v2/enterprise/members/organizations', params: {} });
+    assert.deepEqual(matchRoute('GET', '/v2/enterprise/members/mem-1'), { upstreamPath: '/v2/enterprise/members/mem-1', params: { member_id: 'mem-1' } });
+
+    // Bulk revoke (no key id) vs single revoke — same method, different segment count
+    assert.deepEqual(matchRoute('DELETE', '/v2/enterprise/api-keys'), { upstreamPath: '/v2/enterprise/api-keys', params: {} });
+    assert.deepEqual(matchRoute('DELETE', '/v2/enterprise/api-keys/key-9'), { upstreamPath: '/v2/enterprise/api-keys/key-9', params: { key_id: 'key-9' } });
+  });
 });
+
+/**
+ * Generate a concrete sample path for a route pattern by replacing every
+ * `:name` placeholder with `sample-<name>`. The same substitution is
+ * used on the upstream template so the walker test can validate that
+ * the proxy forwards to the right URL regardless of how many path
+ * params a route declares (the v1 list only uses `:id`, but the v3
+ * list uses `:org_id`, `:devin_id`, `:note_id`, `:playbook_id`,
+ * `:secret_id`, `:attachment_id`, `:user_id`, etc.).
+ */
+function fillPattern(input) {
+  return input.replace(/(:|\$\{)(\w+)\}?/g, (_, _prefix, name) => `sample-${name}`);
+}
 
 describe('handleDevinPassthrough — auth + routing', () => {
   it('returns 503 when DEVIN_API_KEY is missing', async () => {
@@ -296,10 +353,9 @@ describe('handleDevinPassthrough — error pass-through', () => {
 
 describe('handleDevinPassthrough — every allowed route reaches the right upstream URL', () => {
   it('walks ALLOWED_ROUTES and checks each one passes through', async () => {
-    const sampleId = 'devin-sample';
     for (const [method, pattern, template] of ALLOWED_ROUTES) {
-      const concretePath = pattern.replace(':id', sampleId);
-      const upstream = template.replace(/\$\{id\}/g, sampleId);
+      const concretePath = fillPattern(pattern);
+      const upstream = fillPattern(template);
       const calls = installFetchStub({
         [`${method} ${upstream}`]: () => new Response(JSON.stringify({ ok: true, route: `${method} ${upstream}` }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
@@ -319,5 +375,75 @@ describe('handleDevinPassthrough — every allowed route reaches the right upstr
       assert.equal(calls.length, 1, `${method} ${concretePath} should issue exactly one upstream call`);
       assert.match(calls[0].url, new RegExp(upstream.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     }
+  });
+
+  it('forwards v3 organization session creation including the org_id from the URL', async () => {
+    const calls = installFetchStub({
+      'POST /v3/organizations/org-real/sessions': () =>
+        new Response(JSON.stringify({ devin_id: 'devin-fresh' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({
+      method: 'POST',
+      url: '/v1/devin/v3/organizations/org-real/sessions',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello', max_acu_limit: 5 }),
+    });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.deepEqual(res._json(), { devin_id: 'devin-fresh' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.devin.ai/v3/organizations/org-real/sessions');
+    assert.equal(calls[0].headers.Authorization, 'Bearer apk_test_passthrough');
+    assert.equal(JSON.parse(calls[0].body).prompt, 'hello');
+  });
+
+  it('preserves query strings on v3 list endpoints (cursor pagination)', async () => {
+    const calls = installFetchStub({
+      'GET /v3/organizations/org-real/sessions': () =>
+        new Response(JSON.stringify({ items: [], has_more: false }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({
+      method: 'GET',
+      url: '/v1/devin/v3/organizations/org-real/sessions?first=50&after=cursor-abc',
+    });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(calls[0].url, 'https://api.devin.ai/v3/organizations/org-real/sessions?first=50&after=cursor-abc');
+  });
+
+  it('forwards v2 enterprise audit-logs reads through verbatim', async () => {
+    const calls = installFetchStub({
+      'GET /v2/enterprise/audit-logs': () =>
+        new Response(JSON.stringify({ logs: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({
+      method: 'GET',
+      url: '/v1/devin/v2/enterprise/audit-logs?limit=100',
+    });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(calls[0].url, 'https://api.devin.ai/v2/enterprise/audit-logs?limit=100');
+  });
+
+  it('rejects sub-paths not in the allowlist even if they look v3-shaped', async () => {
+    const calls = installFetchStub({});
+    const req = mockReq({
+      method: 'POST',
+      url: '/v1/devin/v3/organizations/org-real/sessions/devin-x/danger',
+    });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 404);
+    assert.equal(res._json().error.type, 'not_found');
+    assert.equal(calls.length, 0);
   });
 });
