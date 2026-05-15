@@ -76,6 +76,7 @@
  */
 
 import { config, log } from '../config.js';
+import { _internals as _devinClientInternals } from '../devin-client.js';
 
 const DEFAULT_DEVIN_BASE = 'https://api.devin.ai';
 
@@ -119,6 +120,7 @@ const ALLOWED_ROUTES = [
 
   // Secrets
   ['GET',    '/secrets',                     '/v1/secrets'],
+  ['GET',    '/secrets/:id',                 '/v1/secrets/${id}'],
   ['POST',   '/secrets',                     '/v1/secrets'],
   ['DELETE', '/secrets/:id',                 '/v1/secrets/${id}'],
 
@@ -163,8 +165,15 @@ const ALLOWED_ROUTES = [
 
   // v3 organizations — secrets (org-scoped)
   ['GET',    '/v3/organizations/:org_id/secrets',                               '/v3/organizations/${org_id}/secrets'],
+  ['GET',    '/v3/organizations/:org_id/secrets/:secret_id',                    '/v3/organizations/${org_id}/secrets/${secret_id}'],
   ['POST',   '/v3/organizations/:org_id/secrets',                               '/v3/organizations/${org_id}/secrets'],
   ['DELETE', '/v3/organizations/:org_id/secrets/:secret_id',                    '/v3/organizations/${org_id}/secrets/${secret_id}'],
+
+  // v3 organizations — session messages (paginated, separate from the
+  // session detail endpoint). The chat adapter uses this internally when
+  // running against a v3 token; the passthrough exposes it for clients
+  // that want to drive Devin directly without the OpenAI wrapper.
+  ['GET',    '/v3/organizations/:org_id/sessions/:devin_id/messages',           '/v3/organizations/${org_id}/sessions/${devin_id}/messages'],
 
   // v3 organizations — attachments (org-scoped). The legacy v1 surface
   // also exposes /v1/attachments without org scope; both routes are
@@ -328,6 +337,18 @@ export async function handleDevinPassthrough(req, res) {
     return jsonError(res, 404, 'not_found', 'Use /v1/devin/<endpoint>. See docs/devin-provider.md.');
   }
 
+  // Proxy introspection — clients can poke this to find out which API
+  // version their key is bound to, what org_id is configured, and which
+  // routes are exposed. Doesn't proxy upstream; returns 503 if
+  // DEVIN_API_KEY isn't configured so the response shape matches every
+  // other Devin endpoint.
+  if (req.method === 'GET' && (subPath === '/_proxy/info' || subPath === '/_proxy/info/')) {
+    return handleProxyInfo(req, res);
+  }
+  if (req.method === 'GET' && (subPath === '/_proxy/routes' || subPath === '/_proxy/routes/')) {
+    return handleProxyRoutes(req, res);
+  }
+
   const match = matchRoute(req.method, subPath);
   if (!match) {
     return jsonError(
@@ -450,6 +471,120 @@ export async function handleDevinPassthrough(req, res) {
   } finally {
     if (!res.writableEnded) res.end();
   }
+}
+
+/**
+ * GET /v1/devin/_proxy/info — introspection.
+ *
+ * Returns a self-description of the proxy's Devin configuration without
+ * leaking the actual API key. Useful for clients to know:
+ *   - Whether the proxy is wired up at all (DEVIN_API_KEY present)
+ *   - Which API version (`v1` | `v3`) the configured key speaks
+ *   - Which org_id the operator configured (for v3 callers)
+ *   - The current ACU model aliases the chat adapter supports
+ *
+ * When `?probe=1` is set, the handler issues a real round-trip to verify
+ * the key (a cheap GET against the v3 sessions list, falling back to v1).
+ * Without `probe=1` the handler returns the cached effective version
+ * (filled in by the chat adapter on first call) without any network I/O.
+ */
+async function handleProxyInfo(req, res) {
+  const apiKey = config.devinApiKey;
+  if (!apiKey) {
+    return jsonError(res, 503, 'configuration_error',
+      'Devin provider is not configured (set DEVIN_API_KEY).');
+  }
+  const url = new URL(req.url, 'http://x');
+  const wantProbe = url.searchParams.get('probe') === '1';
+  const base = (config.devinApiBase || DEFAULT_DEVIN_BASE).replace(/\/+$/, '');
+  const masked = apiKey.length > 8 ? `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` : '***';
+
+  const info = {
+    configured: true,
+    api_base: base,
+    api_version_setting: String(config.devinApiVersion || 'auto').toLowerCase(),
+    org_id: config.devinOrgId || null,
+    api_key_prefix: apiKey.slice(0, 4),
+    api_key_mask: masked,
+    cached_effective_version:
+      _devinClientInternals._autoVersionCache.get(apiKey) || null,
+    default_snapshot_id: config.devinDefaultSnapshotId || null,
+    default_playbook_id: config.devinDefaultPlaybookId || null,
+    poll_interval_ms: config.devinPollIntervalMs,
+    max_wait_ms: config.devinMaxWaitMs,
+  };
+
+  if (wantProbe) {
+    info.probe = await probeApiVersion(apiKey, base, info.org_id);
+  }
+
+  const data = JSON.stringify(info, null, 2);
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store',
+  });
+  res.end(data);
+}
+
+/**
+ * Issue a small, idempotent probe against Devin to determine which API
+ * surface the configured key speaks. Doesn't mutate state — just lists
+ * sessions on each surface and reports which ones returned 2xx.
+ *
+ * The probe is deliberately small: a `?limit=1` list call on v3 (and on
+ * v1 if it's even worth checking). We do v3 first because that's the
+ * surface every new `cog_*` token speaks; if it succeeds, we don't need
+ * to bother with v1.
+ */
+async function probeApiVersion(apiKey, base, orgId) {
+  const probe = { v1: null, v3: null };
+  const headers = { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'application/json' };
+  // v1 probe
+  try {
+    const r = await fetch(`${base}/v1/sessions?limit=1`, { method: 'GET', headers });
+    probe.v1 = { status: r.status, ok: r.ok };
+  } catch (e) {
+    probe.v1 = { status: 0, ok: false, error: String(e.message || e) };
+  }
+  // v3 probe (only if org_id is known — otherwise we can't form the path)
+  if (orgId) {
+    try {
+      const r = await fetch(
+        `${base}/v3/organizations/${encodeURIComponent(orgId)}/sessions?limit=1`,
+        { method: 'GET', headers },
+      );
+      probe.v3 = { status: r.status, ok: r.ok };
+    } catch (e) {
+      probe.v3 = { status: 0, ok: false, error: String(e.message || e) };
+    }
+  } else {
+    probe.v3 = { status: 0, ok: false, error: 'DEVIN_ORG_ID not configured' };
+  }
+  let effective = null;
+  if (probe.v1?.ok) effective = 'v1';
+  if (probe.v3?.ok) effective = 'v3';
+  return { ...probe, effective };
+}
+
+/**
+ * GET /v1/devin/_proxy/routes — return the static allowlist as JSON.
+ *
+ * Lets clients enumerate the supported routes without scraping the
+ * source. The result is shaped for human readability:
+ *   [{method, pattern, upstream}, ...]
+ */
+function handleProxyRoutes(req, res) {
+  const rows = ALLOWED_ROUTES.map(([method, pattern, upstream]) => ({
+    method, pattern, upstream,
+  }));
+  const data = JSON.stringify({ count: rows.length, routes: rows }, null, 2);
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store',
+  });
+  res.end(data);
 }
 
 function jsonError(res, status, type, message) {

@@ -477,6 +477,10 @@ describe('docs/devin-provider.md ↔ ALLOWED_ROUTES consistency', () => {
     // Skip the OpenAI/Anthropic translation surfaces — those are not
     // proxied through /v1/devin so they shouldn't be in ALLOWED_ROUTES.
     if (!proxyPath.startsWith('/')) continue;
+    // Skip /v1/devin/_proxy/* — those are introspection endpoints
+    // handled inline in handleDevinPassthrough, not entries in
+    // ALLOWED_ROUTES (which is only for upstream-bound passthrough).
+    if (proxyPath.startsWith('/_proxy/')) continue;
     const methodsCell = m[2];
     const methods = methodsCell.match(/`(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)`/g);
     if (!methods) continue;

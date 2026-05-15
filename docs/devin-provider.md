@@ -45,8 +45,10 @@ WindsurfAPI 可以选择性地把 [Cognition Devin](https://devin.ai) 的官方 
 
 | 变量                                | 默认                    | 说明                                                                                       |
 | ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
-| `DEVIN_API_KEY`                     | **必填**                | Devin org 的 API key。Service-user key 以 `apk_` 开头，个人 key 以 `apk_user_` 开头。     |
+| `DEVIN_API_KEY`                     | **必填**                | Devin org 的 API key。Service-user key 以 `apk_`（v1 legacy）或 `cog_`（v3 当前）开头，个人 key 以 `apk_user_` 开头（v3）。 |
 | `DEVIN_API_BASE`                    | `https://api.devin.ai`  | 自定义只在 Devin Enterprise 上才需要。                                                     |
+| `DEVIN_API_VERSION`                 | `auto`                  | `auto` / `v1` / `v3`。`auto` 时优先用 `/v1/sessions`，遇到 401/403 且 `DEVIN_ORG_ID` 已配置就自动切到 `/v3/organizations/<org>/sessions` 并缓存选择。 |
+| `DEVIN_ORG_ID`                      | —                       | `DEVIN_API_VERSION=v3`（或 auto 触发了 v3 fallback）时**必填**。`cog_*` / `apk_user_*` 这两类 token 不会从 bearer 推断 org，必须显式带 org_id。 |
 | `DEVIN_DEFAULT_SNAPSHOT_ID`         | —                       | 给每个 session 默认带上的 snapshot（仓库环境）id。可被 `metadata.devin_snapshot_id` 覆盖。 |
 | `DEVIN_DEFAULT_PLAYBOOK_ID`         | —                       | 给每个 session 默认带上的 playbook id。可被 `metadata.devin_playbook_id` 覆盖。            |
 | `DEVIN_POLL_INTERVAL_MS`            | `2000`                  | 轮询 `GET /v1/sessions/{id}` 的间隔。                                                      |
@@ -149,6 +151,27 @@ print(msg.content[0].text)
 
 除了把 chat completions 翻译给 Devin 之外，WindsurfAPI 还在 `/v1/devin/*` 下挂了 Devin Cloud 的完整 REST 工具链，方便不想自己管 `DEVIN_API_KEY` 的客户端把 sessions / attachments / knowledge / playbooks / secrets / 以及 v3 RBAC 和 v2 enterprise 已发布的 admin / audit / consumption 接口都走这一个代理。总共白名单一百多条路由，全部定义在 `src/handlers/devin-passthrough.js` 的 `ALLOWED_ROUTES` 中。
 
+### 自省端点（不消耗 ACU，不需要 `DEVIN_API_KEY` 之外的额外配置）
+
+| 路由                       | 方法  | 说明                                                                                                  |
+| -------------------------- | ----- | ----------------------------------------------------------------------------------------------------- |
+| `/v1/devin/_proxy/info`    | `GET` | 返回当前 Devin 配置（API 版本设定 / 缓存的实际版本 / org_id / 默认 snapshot/playbook / 轮询参数）。**不会**泄露 `DEVIN_API_KEY` 原文，仅给前 4 字符 + 末 4 字符的 mask。 |
+| `/v1/devin/_proxy/info?probe=1` | `GET` | 同上，并且实际访问 `GET /v1/sessions?limit=1` 和 `GET /v3/organizations/<org>/sessions?limit=1` 探活，把上游状态码写进 `probe.{v1,v3,effective}` 返回。 |
+| `/v1/devin/_proxy/routes`  | `GET` | 返回完整的白名单路由表 JSON，供客户端枚举或自动生成 SDK。                                              |
+
+```bash
+# 探活 + 看代理拿到的实际能力
+curl -s http://localhost:3003/v1/devin/_proxy/info?probe=1 -H "Authorization: Bearer $PROXY_API_KEY" | jq
+# {
+#   "configured": true,
+#   "api_version_setting": "auto",
+#   "org_id": "org-xxxxxxxx",
+#   "api_key_mask": "cog_…yova",
+#   "cached_effective_version": "v3",
+#   "probe": { "v1": {"status": 401}, "v3": {"status": 200}, "effective": "v3" }
+# }
+```
+
 ### v1 （legacy，默认挂载名下；API key 需以 `apk_` / `apk_user_` 开头）
 
 | 路由                                          | 方法              | 上游                                  |
@@ -164,7 +187,7 @@ print(msg.content[0].text)
 | `/v1/devin/playbooks`                         | `GET` / `POST`    | `/v1/playbooks`                       |
 | `/v1/devin/playbooks/:id`                     | `GET` / `PATCH` / `PUT` / `DELETE` | `/v1/playbooks/{id}` |
 | `/v1/devin/secrets`                           | `GET` / `POST`    | `/v1/secrets`                         |
-| `/v1/devin/secrets/:id`                       | `DELETE`          | `/v1/secrets/{id}`                    |
+| `/v1/devin/secrets/:id`                       | `GET` / `DELETE`  | `/v1/secrets/{id}`                    |
 
 ### v3 organizations（当前主推 API，RBAC / service-user token 以 `cog_` 开头）
 
@@ -175,7 +198,7 @@ print(msg.content[0].text)
 | `/v1/devin/v3/organizations/:org_id/sessions`                                 | `GET` / `POST`                             |
 | `/v1/devin/v3/organizations/:org_id/sessions/insights`                        | `GET`                                      |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id`                       | `GET` / `DELETE`                           |
-| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/messages`              | `POST`                                     |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/messages`              | `GET` (paginated) / `POST`                 |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/tags`                  | `POST` (append) / `PUT` (replace)          |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/archive`               | `POST`                                     |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/attachments`           | `POST` (multipart)                         |
@@ -185,7 +208,7 @@ print(msg.content[0].text)
 | `/v1/devin/v3/organizations/:org_id/playbooks`                                | `GET` / `POST`                             |
 | `/v1/devin/v3/organizations/:org_id/playbooks/:playbook_id`                   | `GET` / `PATCH` / `PUT` / `DELETE`         |
 | `/v1/devin/v3/organizations/:org_id/secrets`                                  | `GET` / `POST`                             |
-| `/v1/devin/v3/organizations/:org_id/secrets/:secret_id`                       | `DELETE`                                   |
+| `/v1/devin/v3/organizations/:org_id/secrets/:secret_id`                       | `GET` / `DELETE`                           |
 | `/v1/devin/v3/organizations/:org_id/attachments`                              | `POST` (multipart)                         |
 | `/v1/devin/v3/organizations/:org_id/attachments/:attachment_id/file`         | `GET` (302 透传)                            |
 | `/v1/devin/v3/organizations/:org_id/service-users`                            | `GET` / `POST`                             |
