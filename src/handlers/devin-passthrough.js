@@ -140,7 +140,7 @@ const ALLOWED_ROUTES = [
   ['DELETE', '/v3/organizations/:org_id/sessions/:devin_id',                    '/v3/organizations/${org_id}/sessions/${devin_id}'],
   ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/messages',           '/v3/organizations/${org_id}/sessions/${devin_id}/messages'],
   ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/tags',               '/v3/organizations/${org_id}/sessions/${devin_id}/tags'],
-  ['DELETE', '/v3/organizations/:org_id/sessions/:devin_id/tags',               '/v3/organizations/${org_id}/sessions/${devin_id}/tags'],
+  ['PUT',    '/v3/organizations/:org_id/sessions/:devin_id/tags',               '/v3/organizations/${org_id}/sessions/${devin_id}/tags'],
   ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/archive',            '/v3/organizations/${org_id}/sessions/${devin_id}/archive'],
   ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/attachments',        '/v3/organizations/${org_id}/sessions/${devin_id}/attachments'],
   ['POST',   '/v3/organizations/:org_id/sessions/:devin_id/insights/generate',  '/v3/organizations/${org_id}/sessions/${devin_id}/insights/generate'],
@@ -192,6 +192,16 @@ const ALLOWED_ROUTES = [
 
   ['GET',    '/v3/enterprise/sessions',                                         '/v3/enterprise/sessions'],
   ['GET',    '/v3/enterprise/sessions/:devin_id',                               '/v3/enterprise/sessions/${devin_id}'],
+  ['DELETE', '/v3/enterprise/sessions/:devin_id',                               '/v3/enterprise/sessions/${devin_id}'],
+  ['POST',   '/v3/enterprise/sessions/:devin_id/messages',                      '/v3/enterprise/sessions/${devin_id}/messages'],
+  ['POST',   '/v3/enterprise/sessions/:devin_id/archive',                       '/v3/enterprise/sessions/${devin_id}/archive'],
+  ['POST',   '/v3/enterprise/sessions/:devin_id/tags',                          '/v3/enterprise/sessions/${devin_id}/tags'],
+  ['PUT',    '/v3/enterprise/sessions/:devin_id/tags',                          '/v3/enterprise/sessions/${devin_id}/tags'],
+
+  // List the organizations under this enterprise (mentioned in the v3
+  // migration guide as a current-API-only endpoint). Useful for ops
+  // dashboards that want to enumerate orgs without falling back to v2.
+  ['GET',    '/v3/enterprise/organizations',                                    '/v3/enterprise/organizations'],
 
   ['GET',    '/v3/enterprise/knowledge/notes',                                  '/v3/enterprise/knowledge/notes'],
   ['POST',   '/v3/enterprise/knowledge/notes',                                  '/v3/enterprise/knowledge/notes'],

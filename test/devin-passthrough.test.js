@@ -9,6 +9,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 import { config } from '../src/config.js';
 import {
@@ -445,5 +448,67 @@ describe('handleDevinPassthrough — every allowed route reaches the right upstr
     assert.equal(res._status(), 404);
     assert.equal(res._json().error.type, 'not_found');
     assert.equal(calls.length, 0);
+  });
+});
+
+/**
+ * Adversarial: every method/path tuple advertised in docs/devin-provider.md
+ * must resolve to a row in ALLOWED_ROUTES. Without this the route tables in
+ * docs and the matcher silently drift apart — e.g. the docs once advertised
+ * `PUT /v3/organizations/:org_id/sessions/:devin_id/tags` while the code
+ * only listed DELETE on the same path. The walker would not catch that
+ * because it iterates rows that ARE in the table.
+ */
+describe('docs/devin-provider.md ↔ ALLOWED_ROUTES consistency', () => {
+  // Inline parser so the test stays self-contained. The route tables in
+  // devin-provider.md follow a fixed shape:
+  //   | `/v1/devin/<proxy-path>` | `METHOD1` / `METHOD2` (annotation) |
+  // The proxy-path is what handleDevinPassthrough sees after stripping
+  // the `/v1/devin/` prefix, so it is also what matchRoute consumes.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const md = readFileSync(resolve(here, '..', 'docs', 'devin-provider.md'), 'utf-8');
+
+  const documented = [];
+  for (const line of md.split('\n')) {
+    if (!line.startsWith('|')) continue;
+    const m = line.match(/^\|\s*`(\/v1\/devin\/[^`]*)`\s*\|\s*([^|]+)\|/);
+    if (!m) continue;
+    const proxyPath = m[1].replace(/^\/v1\/devin/, '') || '/';
+    // Skip the OpenAI/Anthropic translation surfaces — those are not
+    // proxied through /v1/devin so they shouldn't be in ALLOWED_ROUTES.
+    if (!proxyPath.startsWith('/')) continue;
+    const methodsCell = m[2];
+    const methods = methodsCell.match(/`(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)`/g);
+    if (!methods) continue;
+    for (const tok of methods) {
+      const method = tok.replace(/`/g, '');
+      documented.push({ method, path: proxyPath });
+    }
+  }
+
+  it('parses at least one row out of the docs (sanity)', () => {
+    assert.ok(documented.length > 20, `expected >20 documented routes, got ${documented.length}`);
+  });
+
+  it('every documented (METHOD, path) tuple matches a row in ALLOWED_ROUTES', () => {
+    const missing = [];
+    for (const { method, path } of documented) {
+      const concrete = fillPattern(path);
+      const got = matchRoute(method, concrete);
+      if (!got) missing.push(`${method} ${path}`);
+    }
+    assert.deepEqual(missing, [], `Routes in docs but missing from ALLOWED_ROUTES:\n  ${missing.join('\n  ')}`);
+  });
+
+  it('every ALLOWED_ROUTES row is mentioned somewhere in docs', () => {
+    // Build a normalized lookup of documented (METHOD, path) pairs.
+    const docSet = new Set(documented.map(({ method, path }) => `${method} ${path}`));
+    const undocumented = [];
+    for (const [method, pattern] of ALLOWED_ROUTES) {
+      if (!docSet.has(`${method} ${pattern}`)) {
+        undocumented.push(`${method} ${pattern}`);
+      }
+    }
+    assert.deepEqual(undocumented, [], `Routes in ALLOWED_ROUTES but absent from docs:\n  ${undocumented.join('\n  ')}`);
   });
 });

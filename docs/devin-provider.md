@@ -176,7 +176,7 @@ print(msg.content[0].text)
 | `/v1/devin/v3/organizations/:org_id/sessions/insights`                        | `GET`                                      |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id`                       | `GET` / `DELETE`                           |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/messages`              | `POST`                                     |
-| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/tags`                  | `POST` / `DELETE`                          |
+| `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/tags`                  | `POST` (append) / `PUT` (replace)          |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/archive`               | `POST`                                     |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/attachments`           | `POST` (multipart)                         |
 | `/v1/devin/v3/organizations/:org_id/sessions/:devin_id/insights/generate`     | `POST`                                     |
@@ -197,8 +197,12 @@ print(msg.content[0].text)
 
 | 路由                                                       | 方法                                   |
 | --------------------------------------------------------- | -------------------------------------- |
+| `/v1/devin/v3/enterprise/organizations`                   | `GET` (list orgs in enterprise)        |
 | `/v1/devin/v3/enterprise/sessions`                        | `GET`                                  |
-| `/v1/devin/v3/enterprise/sessions/:devin_id`              | `GET`                                  |
+| `/v1/devin/v3/enterprise/sessions/:devin_id`              | `GET` / `DELETE`                       |
+| `/v1/devin/v3/enterprise/sessions/:devin_id/messages`     | `POST`                                 |
+| `/v1/devin/v3/enterprise/sessions/:devin_id/archive`      | `POST`                                 |
+| `/v1/devin/v3/enterprise/sessions/:devin_id/tags`         | `POST` (append) / `PUT` (replace)      |
 | `/v1/devin/v3/enterprise/knowledge/notes`                 | `GET` / `POST`                         |
 | `/v1/devin/v3/enterprise/knowledge/notes/:note_id`        | `GET` / `PATCH` / `PUT` / `DELETE`     |
 | `/v1/devin/v3/enterprise/playbooks`                       | `GET` / `POST`                         |
