@@ -18,11 +18,14 @@ import {
   handleDevinPassthrough,
   matchRoute,
   ALLOWED_ROUTES,
+  DEVIN_ROOT_PREFIXES,
+  isDevinRootPath,
 } from '../src/handlers/devin-passthrough.js';
 
 const originalFetch = globalThis.fetch;
 const originalDevinKey = config.devinApiKey;
 const originalDevinBase = config.devinApiBase;
+const originalTransparentMount = config.devinProxyTransparentMount;
 
 function installFetchStub(routes) {
   const calls = [];
@@ -90,6 +93,7 @@ afterEach(() => {
   restoreFetch();
   config.devinApiKey = originalDevinKey;
   config.devinApiBase = originalDevinBase;
+  config.devinProxyTransparentMount = originalTransparentMount;
 });
 
 describe('matchRoute', () => {
@@ -514,5 +518,146 @@ describe('docs/devin-provider.md ↔ ALLOWED_ROUTES consistency', () => {
       }
     }
     assert.deepEqual(undocumented, [], `Routes in ALLOWED_ROUTES but absent from docs:\n  ${undocumented.join('\n  ')}`);
+  });
+});
+
+describe('transparent root mount (DEVIN_PROXY_TRANSPARENT_MOUNT)', () => {
+  it('isDevinRootPath returns false when the flag is off', () => {
+    config.devinProxyTransparentMount = false;
+    for (const root of DEVIN_ROOT_PREFIXES) {
+      assert.equal(isDevinRootPath(root), false, `${root} should not match when off`);
+      assert.equal(isDevinRootPath(root + '/something'), false);
+    }
+    assert.equal(isDevinRootPath('/v1/chat/completions'), false);
+    assert.equal(isDevinRootPath('/v1/devin/sessions'), false);
+  });
+
+  it('isDevinRootPath matches every advertised root and only Devin paths when on', () => {
+    config.devinProxyTransparentMount = true;
+    for (const root of DEVIN_ROOT_PREFIXES) {
+      assert.equal(isDevinRootPath(root), true, `${root} should match`);
+      assert.equal(isDevinRootPath(root + '/abc'), true, `${root}/abc should match`);
+    }
+    // Negative cases — must not steal proxy-owned paths.
+    assert.equal(isDevinRootPath('/v1/chat/completions'), false);
+    assert.equal(isDevinRootPath('/v1/models'), false);
+    assert.equal(isDevinRootPath('/v1/messages'), false);
+    assert.equal(isDevinRootPath('/v1/responses'), false);
+    assert.equal(isDevinRootPath('/v1/devin/sessions'), false, '/v1/devin/* keeps its own dispatch');
+    assert.equal(isDevinRootPath('/v1/devin'), false);
+    assert.equal(isDevinRootPath('/v1/sessions-impostor'), false, 'must not match by substring');
+    assert.equal(isDevinRootPath('/v1'), false);
+    assert.equal(isDevinRootPath(''), false);
+    assert.equal(isDevinRootPath(null), false);
+  });
+
+  it('forwards /v1/sessions to api.devin.ai/v1/sessions when transparent mount is on', async () => {
+    config.devinProxyTransparentMount = true;
+    const calls = installFetchStub({
+      'GET /v1/sessions': () =>
+        new Response(JSON.stringify({ items: [], _proof: 'v1-list' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({ method: 'GET', url: '/v1/sessions?limit=1' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(res._json()._proof, 'v1-list');
+    assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0].url).pathname, '/v1/sessions');
+    assert.equal(new URL(calls[0].url).searchParams.get('limit'), '1');
+    assert.equal(calls[0].headers.Authorization, 'Bearer apk_test_passthrough');
+  });
+
+  it('forwards /v3/organizations/<org>/sessions verbatim when transparent mount is on', async () => {
+    config.devinProxyTransparentMount = true;
+    const calls = installFetchStub({
+      'GET /v3/organizations/org-xyz/sessions': () =>
+        new Response(JSON.stringify({ items: [{ session_id: 'devin-1' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({ method: 'GET', url: '/v3/organizations/org-xyz/sessions' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0].url).pathname, '/v3/organizations/org-xyz/sessions');
+  });
+
+  it('forwards /v2/enterprise/* verbatim when transparent mount is on', async () => {
+    config.devinProxyTransparentMount = true;
+    const calls = installFetchStub({
+      'GET /v2/enterprise/organizations': () =>
+        new Response(JSON.stringify({ organizations: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({ method: 'GET', url: '/v2/enterprise/organizations' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(new URL(calls[0].url).pathname, '/v2/enterprise/organizations');
+  });
+
+  it('returns 404 for /v1/sessions when transparent mount is OFF (default)', async () => {
+    config.devinProxyTransparentMount = false;
+    const calls = installFetchStub({});
+    const req = mockReq({ method: 'GET', url: '/v1/sessions' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 404);
+    assert.match(res._json().error.message, /Unknown path: \/v1\/sessions/);
+    assert.equal(calls.length, 0, 'must not call upstream when path is not recognised');
+  });
+
+  it('still serves /v1/devin/* even with transparent mount on (no behavioural regression)', async () => {
+    config.devinProxyTransparentMount = true;
+    const calls = installFetchStub({
+      'GET /v1/sessions': () =>
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }),
+    });
+    const req = mockReq({ method: 'GET', url: '/v1/devin/sessions' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0].url).pathname, '/v1/sessions');
+  });
+
+  it('returns 404 for unknown methods on a recognised root (e.g. PATCH /v1/sessions)', async () => {
+    config.devinProxyTransparentMount = true;
+    const calls = installFetchStub({});
+    const req = mockReq({ method: 'PATCH', url: '/v1/sessions' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 404);
+    assert.match(res._json().error.message, /No Devin passthrough route for PATCH \/v1\/sessions/);
+    assert.equal(calls.length, 0);
+  });
+
+  it('/_proxy/info reports the transparent-mount flag', async () => {
+    config.devinProxyTransparentMount = true;
+    const req = mockReq({ method: 'GET', url: '/v1/devin/_proxy/info' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    const body = res._json();
+    assert.equal(body.transparent_mount, true);
+    assert.deepEqual(body.transparent_mount_roots, [...DEVIN_ROOT_PREFIXES]);
+  });
+
+  it('/_proxy/info hides the roots list when the flag is off', async () => {
+    config.devinProxyTransparentMount = false;
+    const req = mockReq({ method: 'GET', url: '/v1/devin/_proxy/info' });
+    const res = mockRes();
+    await handleDevinPassthrough(req, res);
+    assert.equal(res._status(), 200);
+    const body = res._json();
+    assert.equal(body.transparent_mount, false);
+    assert.equal(body.transparent_mount_roots, null);
   });
 });

@@ -25,6 +25,16 @@
  * ───────
  *   /v1/devin/<rest>   →  https://api.devin.ai/<rest>
  *
+ * When `DEVIN_PROXY_TRANSPARENT_MOUNT=1`, the same routes are ALSO
+ * recognised at their canonical Devin paths (without the `/v1/devin/`
+ * namespace):
+ *   /v1/sessions, /v1/attachments, /v1/knowledge, /v1/playbooks,
+ *   /v1/secrets, /v2/enterprise/*, /v3/*  →  api.devin.ai/<same>
+ * This lets SDKs that hard-code `https://api.devin.ai` use the proxy
+ * as a drop-in replacement (point base URL at the proxy, optionally
+ * with DNS / /etc/hosts overrides). The namespaced mount is always
+ * active regardless of this flag.
+ *
  * Three Devin API surfaces are exposed under this single mount:
  *   • v1 (legacy, org-scoped via apk_* key): routes that start with
  *     `/sessions`, `/attachments`, `/knowledge`, `/playbooks`, `/secrets`
@@ -275,6 +285,71 @@ const ALLOWED_ROUTES = [
 ];
 
 /**
+ * Top-level Devin API path roots. When `DEVIN_PROXY_TRANSPARENT_MOUNT=1`
+ * is set, the passthrough recognises requests at these roots as Devin
+ * traffic — same allowlist, same upstream, just without the `/v1/devin/`
+ * namespace. This list intentionally avoids `/v1/` as a wildcard because
+ * the proxy owns `/v1/chat/completions`, `/v1/responses`, `/v1/messages`,
+ * `/v1/models`, and the auth endpoints; only the specific Devin v1
+ * collections live at the root.
+ *
+ * Matches if the path equals one of these strings OR starts with `<root>/`,
+ * so /v1/sessions, /v1/sessions/<id>, /v3/organizations/<org>/sessions, etc.
+ * are all recognised but /v1/sessions-other (hypothetical) is not.
+ */
+export const DEVIN_ROOT_PREFIXES = Object.freeze([
+  '/v1/sessions',
+  '/v1/attachments',
+  '/v1/knowledge',
+  '/v1/playbooks',
+  '/v1/secrets',
+  '/v2/enterprise',
+  '/v3',
+]);
+
+/**
+ * Returns true when `path` looks like a Devin top-level path the
+ * transparent root mount should claim. Always returns false when the
+ * transparent mount config flag is off.
+ */
+export function isDevinRootPath(path) {
+  if (!config.devinProxyTransparentMount) return false;
+  if (!path || typeof path !== 'string') return false;
+  // /v1/devin/* keeps its own dispatch; never reroute it through here.
+  if (path === '/v1/devin' || path.startsWith('/v1/devin/')) return false;
+  for (const root of DEVIN_ROOT_PREFIXES) {
+    if (path === root || path.startsWith(root + '/')) return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the request path into a subPath the route table understands.
+ * Returns null when the path doesn't belong to this handler at all
+ * (so the caller can reply 404).
+ *
+ * The allowlist is written in two shapes for historical reasons:
+ *   • v1 patterns are stored WITHOUT the leading `/v1` (e.g. `/sessions`)
+ *     because the legacy mount stripped `/v1/devin` down to `/sessions`.
+ *   • v2 / v3 patterns are stored WITH the leading `/v2` / `/v3` (e.g.
+ *     `/v3/organizations/:org_id/sessions`).
+ * This function normalises the request path to the same shape so a
+ * single `matchRoute` call works for every mount.
+ */
+function resolveSubPath(path) {
+  if (path === '/v1/devin' || path.startsWith('/v1/devin/')) {
+    return path.slice('/v1/devin'.length) || '/';
+  }
+  if (isDevinRootPath(path)) {
+    // /v1/sessions → /sessions  so the v1 rows in ALLOWED_ROUTES match;
+    // /v2/... and /v3/... are already in the canonical pattern form.
+    if (path.startsWith('/v1/')) return path.slice(3);
+    return path;
+  }
+  return null;
+}
+
+/**
  * Match `path` (already stripped of the `/v1/devin` prefix) and `method`
  * against ALLOWED_ROUTES.
  *
@@ -324,14 +399,15 @@ function matchPattern(pattern, path) {
  * body as a stream and pipe it without buffering.
  */
 export async function handleDevinPassthrough(req, res) {
-  // Strip the /v1/devin prefix off the request URL so callers can use
-  // either `/v1/devin/sessions` or `/v1/devin/sessions/xyz?param=1`.
+  // Resolve subPath whether the caller used the namespaced mount
+  // (/v1/devin/<sub>) or, when transparent root mount is enabled, the
+  // canonical Devin path (/v3/..., /v1/sessions, etc.).
   const url = new URL(req.url, 'http://x');
   const fullPath = url.pathname;
-  if (!fullPath.startsWith('/v1/devin')) {
+  let subPath = resolveSubPath(fullPath);
+  if (subPath === null) {
     return jsonError(res, 404, 'not_found', `Unknown path: ${fullPath}`);
   }
-  let subPath = fullPath.slice('/v1/devin'.length) || '/';
   if (subPath !== '/' && subPath.endsWith('/')) subPath = subPath.slice(0, -1);
   if (subPath === '/' || subPath === '') {
     return jsonError(res, 404, 'not_found', 'Use /v1/devin/<endpoint>. See docs/devin-provider.md.');
@@ -355,7 +431,7 @@ export async function handleDevinPassthrough(req, res) {
       res,
       404,
       'not_found',
-      `No Devin passthrough route for ${req.method} /v1/devin${subPath}.`,
+      `No Devin passthrough route for ${req.method} ${fullPath}.`,
     );
   }
 
@@ -512,6 +588,8 @@ async function handleProxyInfo(req, res) {
     default_playbook_id: config.devinDefaultPlaybookId || null,
     poll_interval_ms: config.devinPollIntervalMs,
     max_wait_ms: config.devinMaxWaitMs,
+    transparent_mount: !!config.devinProxyTransparentMount,
+    transparent_mount_roots: config.devinProxyTransparentMount ? [...DEVIN_ROOT_PREFIXES] : null,
   };
 
   if (wantProbe) {

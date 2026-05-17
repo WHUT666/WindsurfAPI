@@ -32,7 +32,7 @@ import { config, log } from './config.js';
 import { VERSION } from './version.js';
 import { callerKeyFromRequest } from './caller-key.js';
 import { resolveModel, getModelInfo } from './models.js';
-import { handleDevinPassthrough } from './handlers/devin-passthrough.js';
+import { handleDevinPassthrough, isDevinRootPath } from './handlers/devin-passthrough.js';
 
 // Devin-sessions models don't use the Windsurf account pool — they
 // talk to api.devin.ai directly. When such a model is requested, skip
@@ -336,6 +336,15 @@ async function route(req, res) {
   // authenticated to the proxy. See handlers/devin-passthrough.js for the
   // route allowlist and the streaming pipeline.
   if (path.startsWith('/v1/devin/') || path === '/v1/devin') {
+    return handleDevinPassthrough(req, res);
+  }
+  // Transparent root mount — when DEVIN_PROXY_TRANSPARENT_MOUNT=1, also
+  // recognise Devin's canonical top-level paths (/v1/sessions,
+  // /v1/attachments, /v1/knowledge, /v1/playbooks, /v1/secrets,
+  // /v2/enterprise/*, /v3/*) so SDKs that hard-code `api.devin.ai` can
+  // use the proxy as a drop-in replacement. isDevinRootPath returns
+  // false when the flag is off, so this branch is a no-op by default.
+  if (isDevinRootPath(path)) {
     return handleDevinPassthrough(req, res);
   }
 
