@@ -55,6 +55,7 @@ WindsurfAPI 可以选择性地把 [Cognition Devin](https://devin.ai) 的官方 
 | `DEVIN_MAX_WAIT_MS`                 | `600000` (10 分钟)      | 同步等待 session 完成的总超时。超时后返回 `finish_reason=length`，但 session 仍然继续跑。  |
 | `DEVIN_SESSION_CACHE_TTL_MS`        | `3600000` (1 小时)      | 指纹 → session_id 缓存的 TTL。                                                             |
 | `DEVIN_SESSION_CACHE_MAX_ENTRIES`   | `1000`                  | 指纹缓存条目上限。超出后 LRU 淘汰。                                                        |
+| `DEVIN_PROXY_TRANSPARENT_MOUNT`     | `0`（关闭）             | 设为 `1` 时，除了 `/v1/devin/*` 之外**也**接受 Devin 的原始路径：`/v1/sessions`、`/v1/attachments`、`/v1/knowledge`、`/v1/playbooks`、`/v1/secrets`、`/v2/enterprise/*`、`/v3/*`。给硬编码 `https://api.devin.ai` 的 SDK / CLI 当 drop-in 替换用（把 base URL 或 DNS 指向代理）。代理自有的 `/v1/chat/completions` / `/v1/responses` / `/v1/messages` / `/v1/models` 不会被劫持。 |
 
 ## 工作原理
 
@@ -168,9 +169,36 @@ curl -s http://localhost:3003/v1/devin/_proxy/info?probe=1 -H "Authorization: Be
 #   "org_id": "org-xxxxxxxx",
 #   "api_key_mask": "cog_…yova",
 #   "cached_effective_version": "v3",
+#   "transparent_mount": false,
+#   "transparent_mount_roots": null,
 #   "probe": { "v1": {"status": 401}, "v3": {"status": 200}, "effective": "v3" }
 # }
 ```
+
+### 透明根挂载（`DEVIN_PROXY_TRANSPARENT_MOUNT=1`）
+
+设这个环境变量为 `1` 后，下面这些 Devin 原始路径会**直接**被代理识别（不需要 `/v1/devin/` 前缀）：
+
+| 根路径                | 上游                              |
+| --------------------- | --------------------------------- |
+| `/v1/sessions/*`      | `api.devin.ai/v1/sessions/*`      |
+| `/v1/attachments/*`   | `api.devin.ai/v1/attachments/*`   |
+| `/v1/knowledge/*`     | `api.devin.ai/v1/knowledge/*`     |
+| `/v1/playbooks/*`     | `api.devin.ai/v1/playbooks/*`     |
+| `/v1/secrets/*`       | `api.devin.ai/v1/secrets/*`       |
+| `/v2/enterprise/*`    | `api.devin.ai/v2/enterprise/*`    |
+| `/v3/*`               | `api.devin.ai/v3/*`               |
+
+```bash
+# 假设代理跑在 https://my-proxy.example.com
+# 任何 Devin 官方 SDK，把 base URL 指向代理就跑：
+export DEVIN_BASE_URL=https://my-proxy.example.com
+export DEVIN_API_KEY=$PROXY_API_KEY   # 注意：这是代理的 API_KEY，不是 cog_*
+curl "$DEVIN_BASE_URL/v3/organizations/org-xxxxxxxx/sessions?limit=1" \
+  -H "Authorization: Bearer $DEVIN_API_KEY"
+```
+
+代理自有的 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`、`/v1/devin/*` 这几条**永远不会**被劫持，所以同一个代理可以同时给 OpenAI 兼容客户端和 Devin 原生客户端使用。当客户端硬编码 `https://api.devin.ai` 无法改 base URL 时，把 `api.devin.ai` 通过 `/etc/hosts` 或公司 DNS 指向代理（需要代理有匹配证书）也能用。
 
 ### v1 （legacy，默认挂载名下；API key 需以 `apk_` / `apk_user_` 开头）
 

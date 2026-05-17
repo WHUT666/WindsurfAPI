@@ -120,6 +120,17 @@ export const config = {
   // header always overrides).
   devinSessionCacheTtlMs: parseInt(process.env.DEVIN_SESSION_CACHE_TTL_MS || String(60 * 60 * 1000), 10),
   devinSessionCacheMaxEntries: parseInt(process.env.DEVIN_SESSION_CACHE_MAX_ENTRIES || '1000', 10),
+  // Transparent root mount for the Devin REST passthrough.
+  //   off (default) — only /v1/devin/<path> is recognised.
+  //   on            — also accept Devin's canonical paths at the root
+  //                   (/v1/sessions, /v1/attachments, /v1/knowledge,
+  //                    /v1/playbooks, /v1/secrets, /v2/enterprise/*,
+  //                    /v3/*) so clients that hard-code `api.devin.ai`
+  //                   can use the proxy as a drop-in replacement by
+  //                   pointing their base URL at it. Off by default to
+  //                   keep behaviour conservative and avoid surprising
+  //                   anyone relying on the namespaced mount.
+  devinProxyTransparentMount: /^(1|true|yes|on)$/i.test(String(process.env.DEVIN_PROXY_TRANSPARENT_MOUNT || '')),
 };
 
 const levels = { debug: 0, info: 1, warn: 2, error: 3 };
