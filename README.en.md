@@ -278,6 +278,10 @@ In your client's settings for **Custom OpenAI Compatible**:
 | `LS_DATA_DIR` | Linux: `/opt/windsurf/data`; macOS: `~/.windsurf/data` | Per-proxy LS data directory root. |
 | `DASHBOARD_PASSWORD` | empty | Dashboard password. Leave empty for no password. |
 | `ALLOW_PRIVATE_PROXY_HOSTS` | empty | Set to `1` to allow private/internal IPs (e.g., `192.168.x.x`, `10.x.x.x`) in proxy tests and login. Leave empty to only allow public addresses (default). |
+| `DEVIN_API_KEY` | empty | Enables the Devin Sessions provider and the `/v1/devin/*` REST passthrough (`devin` / `devin-low` / `devin-medium` / `devin-high` / `devin-xhigh` / `devin-max` / `devin-fast` / `devin-deep` / `devin-acu-<N>` models). Full guide: [`docs/devin-provider.md`](docs/devin-provider.md). |
+| `DEVIN_API_BASE` | `https://api.devin.ai` | Override only if you're on Devin Enterprise with a custom host. |
+| `DEVIN_POLL_INTERVAL_MS` / `DEVIN_MAX_WAIT_MS` | `2000` / `600000` | Polling cadence and wall-clock cap for the synchronous Devin session wrapper. |
+| `DEVIN_DEFAULT_SNAPSHOT_ID` / `DEVIN_DEFAULT_PLAYBOOK_ID` | empty | Defaults applied to every Devin session; per-request overrides via `metadata.devin_snapshot_id` / `devin_playbook_id`. |
 | `CASCADE_REUSE_STRICT` | `0` | Set to `1` for strict conversation reuse mode (waits for same fingerprint). |
 | `CASCADE_REUSE_STRICT_RETRY_MS` | `60000` | Retry delay in ms for strict reuse mode. |
 | `CASCADE_REUSE_HASH_SYSTEM` | `0` | Set to `1` to include system messages in conversation reuse hash. |
@@ -333,6 +337,27 @@ gemini-2.5-pro / flash · gemini-3.0-pro / flash (minimal / low / medium / high 
 <summary><b>Windsurf in-house + Arena</b></summary>
 
 swe-1.5 / 1.5-fast / 1.6 / 1.6-fast · arena-fast · arena-smart
+
+</details>
+
+<details>
+<summary><b>Devin Sessions (optional, requires <code>DEVIN_API_KEY</code>)</b></summary>
+
+Wraps Cognition's official Devin REST API ([docs](https://docs.devin.ai/api-reference/overview)) behind OpenAI / Anthropic endpoints. Completely independent of the Windsurf account pool — uses your own Devin API key and bills against your Devin org ACU budget:
+
+**Catalog (ordered by ACU budget, ascending):**
+
+- `devin` — Devin decides its own ACU budget
+- `devin-low` — `max_acu_limit=2`, single-turn Q&A / quick checks
+- `devin-medium` *(alias `devin-fast`)* — `max_acu_limit=5`, short tasks / tight ACU control
+- `devin-high` — `max_acu_limit=20`, medium features
+- `devin-xhigh` *(alias `devin-deep`)* — `max_acu_limit=50`, complex investigations
+- `devin-max` — `max_acu_limit=100`, multi-PR / large refactors
+- `devin-acu-<N>` — dynamic alias where `N` is `1..10000` (e.g. `devin-acu-30`)
+
+**Devin Cloud REST passthrough (`/v1/devin/*`):** the full sessions / attachments / knowledge / playbooks / secrets CRUD set is reverse-proxied to `api.devin.ai` using the server-side `DEVIN_API_KEY` — clients neither need nor are allowed to send a Devin token themselves.
+
+Supports automatic fingerprint-based session reuse (the same OpenAI history continues the same Devin session), an `X-Devin-Session-Id` header to pin sessions manually, and `metadata.devin_*` fields (max_acu / snapshot_id / playbook_id / knowledge_ids / secret_ids / tags / structured_output_schema, etc.). Full guide: [`docs/devin-provider.md`](docs/devin-provider.md).
 
 </details>
 

@@ -32,6 +32,7 @@ import {
 } from '../cascade-native-bridge.js';
 import { sanitizeText, sanitizeToolCall, PathSanitizeStream } from '../sanitize.js';
 import { registerSseController } from '../sse-registry.js';
+import { handleDevinChat } from './devin-chat.js';
 
 const HEARTBEAT_MS = 15_000;
 const QUEUE_RETRY_MS = 1_000;
@@ -1227,6 +1228,16 @@ export function shouldAutoFallback(body, context, result) {
 }
 
 export async function handleChatCompletions(body, context = {}) {
+  // Devin Sessions provider short-circuit — routes to handleDevinChat
+  // BEFORE any Windsurf-specific logic (account pool, language server,
+  // cascade reuse, drought handling). The Devin upstream is a completely
+  // separate REST API (api.devin.ai) and doesn't share any of that
+  // infrastructure. Detection: resolve the model name and check provider.
+  const devinModelKey = resolveModel(body?.model || '');
+  const devinModelInfo = devinModelKey ? getModelInfo(devinModelKey) : null;
+  if (devinModelInfo?.provider === 'devin-sessions') {
+    return handleDevinChat(body, context);
+  }
   // v2.0.88 (audit H-3) — compute original cache key BEFORE any
   // fallback rewrite. We pass it into the inner via context so a
   // successful fallback writes into the cache slot the NEXT identical
